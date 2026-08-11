@@ -29,7 +29,7 @@ positions ─► pos embedding┘
 | File | What it teaches |
 |------|-----------------|
 | `src/main/kotlin/Tensor.kt` | **Autograd** — the learning machinery. A `Tensor` holds numbers and, after `backward()`, the gradient of the loss w.r.t. each number. Each op (matmul, softmax, layernorm, cross-entropy, RoPE…) knows how to send gradients to its inputs. This is backpropagation. |
-| `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings (learned **or** RoPE), causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, and how they stack into a GPT. |
+| `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings (learned **or** RoPE), causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, optional **weight tying** and **dropout**, and how they stack into a GPT. |
 | `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
 | `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, temperature sampling, and the **CLI** (`train`/`generate`/`chat`). |
 | `src/main/kotlin/Checkpoint.kt` | **Save / load** — serialize a trained model (config + tokenizer + weights) to one file and reload it. |
@@ -78,6 +78,7 @@ BIN=./build/install/kortex/bin/kortex
 # Train and save a checkpoint (weights + tokenizer + config -> one file):
 $BIN train --steps 1500 --out model.bin
 $BIN train --tok bpe --rope --out model.bin        # BPE + rotary positions
+$BIN train --tie --dropout 0.1 --out model.bin     # weight tying + dropout
 $BIN train --data mytext.txt --embed 96 --layers 3 # your own corpus, bigger model
 
 # One-shot continuation from a saved model:
@@ -92,6 +93,12 @@ $BIN chat --model model.bin
 #   to be that is the question. all that glitters is not gold...
 #   Commands inside chat:  :temp 0.4   :top-k 5   :top-p 0.9   :tokens 80   :quit
 ```
+
+**Regularization / efficiency** (train-time): `--tie` shares the token-embedding
+matrix as the output projection (`logits = x · tokEmbᵀ`), removing the separate
+head — fewer parameters (`vocab × embed`) and often better quality. `--dropout F`
+randomly zeros activations during training (disabled at generation) to reduce
+overfitting.
 
 **Sampling knobs** (all optional): `--temp` scales randomness (→0 greedy, >1 wild);
 `--top-k N` samples only from the N most likely tokens; `--top-p F` (nucleus) keeps
