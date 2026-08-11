@@ -8,6 +8,7 @@
  *   (no arg)      -> gradcheck + train(char)
  */
 
+import java.io.File
 import java.util.Random
 import kotlin.math.sqrt
 
@@ -221,15 +222,149 @@ fun posCompare(kind: String) {
     println("to longer contexts because it encodes *relative* position.")
 }
 
+/* ----------------------------- CLI ----------------------------- */
+
+/** Minimal argument parser: `<cmd> [positional...] [--key value] [--flag]`. */
+class Cli(argv: Array<String>) {
+    val cmd = argv.getOrNull(0) ?: "help"
+    val positionals = ArrayList<String>()
+    private val opts = HashMap<String, String>()
+    private val bools = HashSet<String>()
+
+    init {
+        var i = 1
+        while (i < argv.size) {
+            val a = argv[i]
+            if (a.startsWith("--")) {
+                val key = a.substring(2)
+                val next = argv.getOrNull(i + 1)
+                if (next != null && !next.startsWith("--")) { opts[key] = next; i += 2 }
+                else { bools.add(key); i += 1 }
+            } else { positionals.add(a); i += 1 }
+        }
+    }
+
+    fun str(k: String, d: String) = opts[k] ?: d
+    fun strOrNull(k: String) = opts[k]
+    fun int(k: String, d: Int) = opts[k]?.toInt() ?: d
+    fun long(k: String, d: Long) = opts[k]?.toLong() ?: d
+    fun dbl(k: String, d: Double) = opts[k]?.toDouble() ?: d
+    fun flag(k: String) = k in bools
+    /** n-th positional after the command (1-based), or default. */
+    fun pos(n: Int, d: String) = positionals.getOrNull(n - 1) ?: d
+}
+
+/** train: fit a model on the built-in corpus or a text file, then save it. */
+fun cmdTrain(cli: Cli) {
+    val dataPath = cli.strOrNull("data")
+    val text = if (dataPath != null) File(dataPath).readText() else corpus()
+    val kind = cli.str("tok", cli.pos(1, "char"))
+    val useRope = cli.flag("rope")
+    val tok = makeTokenizer(kind, text)
+    val cfg = Config(
+        vocabSize = tok.vocabSize,
+        blockSize = cli.int("block", if (kind == "bpe") 16 else 24),
+        nEmbed = cli.int("embed", 64),
+        nHead = cli.int("heads", 4),
+        nLayer = cli.int("layers", 2),
+        useRope = useRope,
+    )
+    val out = cli.str("out", "model.bin")
+    println("training: tok=$kind rope=$useRope embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} block=${cfg.blockSize}")
+    val model = trainModel(
+        tok, text,
+        steps = cli.int("steps", 1500), batch = cli.int("batch", 12),
+        lr = cli.dbl("lr", 3e-3), cfg = cfg,
+    )
+    Checkpoint.save(out, cfg, model, tok)
+    println("\nsaved model -> $out  (use: generate --model $out --prompt \"...\"  or  chat --model $out)")
+    runCatching {
+        val seed = if (dataPath == null) "to be" else " "
+        println("--- sample ---")
+        println(generate(model, tok, seed, maxNew = 80, temperature = 0.8, rng = Random(7)))
+    }.onFailure { println("(sample skipped: ${it.message})") }
+}
+
+/** generate: load a saved model and continue a prompt once. */
+fun cmdGenerate(cli: Cli) {
+    val path = cli.str("model", "model.bin")
+    if (!File(path).exists()) { System.err.println("No model at '$path'. Train one first: train --out $path"); return }
+    val (model, tok) = Checkpoint.load(path)
+    val prompt = cli.strOrNull("prompt") ?: cli.positionals.joinToString(" ")
+    runCatching {
+        generate(model, tok, prompt, maxNew = cli.int("tokens", 200), temperature = cli.dbl("temp", 0.8), rng = Random(cli.long("seed", 42)))
+    }.onSuccess { println(it) }
+        .onFailure { System.err.println("Cannot encode prompt (a character isn't in the model's vocab): ${it.message}") }
+}
+
+/** chat: interactive REPL — type a prompt, the model continues it. */
+fun cmdChat(cli: Cli) {
+    val path = cli.str("model", "model.bin")
+    if (!File(path).exists()) { System.err.println("No model at '$path'. Train one first: train --out $path"); return }
+    val (model, tok) = Checkpoint.load(path)
+    var tokens = cli.int("tokens", 120)
+    var temp = cli.dbl("temp", 0.8)
+    val rng = Random(cli.long("seed", 42))
+    println("Kortex chat — type a prompt; the model continues it. (A tiny char/BPE LM, not an assistant.)")
+    println("Commands:  :temp <x>   :tokens <n>   :quit")
+    while (true) {
+        print("\n> "); System.out.flush()
+        val line = readLine() ?: break
+        val s = line.trim()
+        when {
+            s == ":quit" || s == ":q" -> break
+            s.isEmpty() -> {}
+            s.startsWith(":temp") -> { temp = s.removePrefix(":temp").trim().toDoubleOrNull() ?: temp; println("temperature=$temp") }
+            s.startsWith(":tokens") -> { tokens = s.removePrefix(":tokens").trim().toIntOrNull() ?: tokens; println("tokens=$tokens") }
+            else -> runCatching { generate(model, tok, s, tokens, temp, rng) }
+                .onSuccess { println(it) }
+                .onFailure { println("(can't encode that — a character isn't in the model's vocab)") }
+        }
+    }
+    println("bye")
+}
+
+fun printHelp() {
+    println(
+        """
+        Kortex — a minimalistic LLM in Kotlin.
+
+        Usage: <command> [options]
+
+        Commands:
+          train        Train a model and save it.
+            --data <file>     text corpus (default: built-in toy corpus)
+            --tok char|bpe    tokenizer (default: char)
+            --rope            rotary positions instead of a learned table
+            --embed N (64)    --heads N (4)   --layers N (2)   --block N
+            --steps N (1500)  --batch N (12)  --lr F (0.003)
+            --out <file>      checkpoint path (default: model.bin)
+
+          generate     Continue a prompt once, using a saved model.
+            --model <file> (model.bin)  --prompt "text"  --tokens N (200)
+            --temp F (0.8)              --seed N (42)
+
+          chat         Interactive REPL over a saved model (reads stdin).
+            --model <file> (model.bin)  --tokens N (120)  --temp F (0.8)
+
+          gradcheck    Verify backprop (learned + RoPE).
+          attn [char|bpe] [--rope]      Train small, visualize attention -> attention.html
+          poscompare [char|bpe]         Compare learned vs. RoPE positions
+          help         Show this message.
+        """.trimIndent()
+    )
+}
+
 fun main(args: Array<String>) {
-    val mode = args.getOrNull(0) ?: "all"
-    val kind = args.getOrNull(1) ?: "char"
-    val useRope = args.getOrNull(2) == "rope"   // 3rd arg: "learned" (default) | "rope"
-    when (mode) {
+    val cli = Cli(args)
+    when (cli.cmd) {
+        "train" -> cmdTrain(cli)
+        "generate" -> cmdGenerate(cli)
+        "chat" -> cmdChat(cli)
         "gradcheck" -> gradCheck()
-        "train" -> train(kind, useRope)
-        "attn" -> attnMode(kind, useRope)
-        "poscompare" -> posCompare(kind)
-        else -> { gradCheck(); train("char", false) }
+        "attn" -> attnMode(cli.pos(1, "char"), cli.flag("rope"))
+        "poscompare" -> posCompare(cli.pos(1, "char"))
+        "help", "--help", "-h" -> printHelp()
+        else -> { gradCheck(); train("char", false) }   // no-arg default demo
     }
 }
