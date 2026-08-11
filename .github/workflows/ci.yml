@@ -1,11 +1,12 @@
 name: CI
 
-# Run the test suite on every push and pull request to main.
+# Run the test suite on pushes and pull requests to the protected branches.
+# Merges into develop/main are gated on this "test" job passing.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   test:

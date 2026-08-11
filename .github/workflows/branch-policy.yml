@@ -1,0 +1,38 @@
+name: Branch policy
+
+# Enforces the merge direction of the branching model:
+#   work-branch ─► develop ─► main
+# GitHub branch protection blocks direct pushes and requires passing checks,
+# but it cannot restrict a PR's *source* branch — this job does that. Make it a
+# required status check so a PR from a disallowed source cannot be merged.
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  branch-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce allowed merge direction
+        env:
+          BASE: ${{ github.base_ref }}   # branch being merged INTO
+          HEAD: ${{ github.head_ref }}   # branch being merged FROM
+        run: |
+          echo "PR: $HEAD -> $BASE"
+          case "$BASE" in
+            main)
+              # main may only be updated by merging develop.
+              if [ "$HEAD" != "develop" ]; then
+                echo "::error::main can only be updated from 'develop' (got '$HEAD')."
+                exit 1
+              fi
+              ;;
+            develop)
+              # develop may only be updated from work branches, never from main.
+              if [ "$HEAD" = "main" ]; then
+                echo "::error::develop cannot be updated from 'main'."
+                exit 1
+              fi
+              ;;
+          esac
+          echo "Merge direction OK."
