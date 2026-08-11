@@ -26,7 +26,16 @@ data class Config(
     val nHead: Int = 4,        // number of attention heads
     val nLayer: Int = 2,       // number of transformer blocks
     val useRope: Boolean = false, // rotary positions instead of a learned table
+    val tieWeights: Boolean = false, // share tokEmb as the output projection
+    val dropout: Double = 0.0, // dropout probability (training only)
 )
+
+/** Carries the dropout probability and RNG through a training forward pass. */
+class DropCtx(val p: Double, val rng: Random)
+
+/** Apply dropout when a context is present (training); otherwise pass through. */
+fun DropCtx?.maybeDropout(x: Tensor): Tensor =
+    if (this == null) x else Tensor.dropout(x, p, training = true, rng = rng)
 
 /** A single causal multi-head self-attention layer. */
 class Attention(cfg: Config, rng: Random) {
@@ -100,11 +109,14 @@ class Block(cfg: Config, rng: Random) {
 
     fun params() = listOf(ln1g, ln1b, ln2g, ln2b) + attn.params() + mlp.params()
 
-    fun forward(x0: Tensor, sink: AttnSink? = null, layer: Int = -1): Tensor {
+    fun forward(x0: Tensor, sink: AttnSink? = null, layer: Int = -1, drop: DropCtx? = null): Tensor {
         // Residual ("+"): the block learns a *correction* to x, which keeps
-        // gradients healthy in deep stacks.
-        val x1 = x0 + attn.forward(Tensor.layerNorm(x0, ln1g, ln1b), sink, layer)
-        return x1 + mlp.forward(Tensor.layerNorm(x1, ln2g, ln2b))
+        // gradients healthy in deep stacks. Dropout is applied to each sub-layer's
+        // output before it's added back (residual dropout), training only.
+        val a = attn.forward(Tensor.layerNorm(x0, ln1g, ln1b), sink, layer)
+        val x1 = x0 + drop.maybeDropout(a)
+        val m = mlp.forward(Tensor.layerNorm(x1, ln2g, ln2b))
+        return x1 + drop.maybeDropout(m)
     }
 
     companion object {
@@ -121,22 +133,29 @@ class GPT(val cfg: Config, seed: Long = 1234L) {
     val posEmb: Tensor? = if (cfg.useRope) null else Tensor.param(cfg.blockSize, cfg.nEmbed, rng)
     val blocks = List(cfg.nLayer) { Block(cfg, rng) }
     val lnFg = Block.ones(cfg.nEmbed); val lnFb = Tensor.zeros(1, cfg.nEmbed)
-    val head = Tensor.param(cfg.nEmbed, cfg.vocabSize, rng)     // hidden -> vocab logits
+    // Weight tying: reuse tokEmb (vocab x d) transposed as the output projection
+    // instead of a separate head (d x vocab). Saves vocab*d params and couples the
+    // "meaning" of a token in and out. When not tied, a dedicated head is learned.
+    val head: Tensor? = if (cfg.tieWeights) null else Tensor.param(cfg.nEmbed, cfg.vocabSize, rng)
+
+    private val dropRng = Random(seed + 777)
 
     fun parameters(): List<Tensor> =
         listOfNotNull(tokEmb, posEmb, lnFg, lnFb, head) + blocks.flatMap { it.params() }
 
     /** Forward pass for one sequence of token ids -> logits (T x vocab). */
-    fun forward(idx: IntArray, sink: AttnSink? = null): Tensor {
+    fun forward(idx: IntArray, sink: AttnSink? = null, train: Boolean = false): Tensor {
+        val drop = if (train && cfg.dropout > 0.0) DropCtx(cfg.dropout, dropRng) else null
         val t = idx.size
         var x = Tensor.gatherRows(tokEmb, idx)
         if (posEmb != null) x = x + Tensor.gatherRows(posEmb, IntArray(t) { it })
-        for ((layer, b) in blocks.withIndex()) x = b.forward(x, sink, layer)
+        x = drop.maybeDropout(x)                                   // embedding dropout
+        for ((layer, b) in blocks.withIndex()) x = b.forward(x, sink, layer, drop)
         x = Tensor.layerNorm(x, lnFg, lnFb)
-        return x matmul head
+        return if (head != null) x matmul head else x matmul tokEmb.transpose()
     }
 
-    /** Forward + cross-entropy loss against the next-token targets. */
+    /** Forward + cross-entropy loss against the next-token targets (train mode). */
     fun loss(idx: IntArray, targets: IntArray): Tensor =
-        Tensor.crossEntropy(forward(idx), targets)
+        Tensor.crossEntropy(forward(idx, train = true), targets)
 }

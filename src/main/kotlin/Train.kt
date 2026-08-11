@@ -72,10 +72,11 @@ fun generate(model: GPT, tok: Tokenizer, prompt: String, maxNew: Int, sampler: S
  * finite differences over a spot-check of parameters. Small error => backprop
  * is correct. Pure/deterministic so tests can assert on it.
  */
-fun computeMaxGradError(useRope: Boolean = false): Double {
+fun computeMaxGradError(useRope: Boolean = false, tie: Boolean = false): Double {
     val text = "hello world, transformers!"
     val tok = CharTokenizer(text)
-    val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2, useRope = useRope)
+    // dropout stays 0 here so the forward pass is deterministic for finite diffs.
+    val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2, useRope = useRope, tieWeights = tie)
     val model = GPT(cfg, seed = 7)
     val idx = tok.encode("hello wo")
     val tgt = tok.encode("ello wor")
@@ -86,8 +87,10 @@ fun computeMaxGradError(useRope: Boolean = false): Double {
     val eps = 1e-5
     val rng = Random(0)
     var maxRel = 0.0
-    // Spot-check a handful of random parameters across a few tensors.
-    val toCheck = listOf(model.head, model.tokEmb, model.blocks[0].attn.wq, model.blocks[1].mlp.w1, model.lnFg)
+    // Spot-check a handful of random parameters across a few tensors. tokEmb is
+    // always included — when tied it also serves as the output projection, so it
+    // exercises both gradient paths.
+    val toCheck = listOfNotNull(model.head, model.tokEmb, model.blocks[0].attn.wq, model.blocks[1].mlp.w1, model.lnFg)
     for (p in toCheck) {
         repeat(6) {
             val i = rng.nextInt(p.data.size)
@@ -105,10 +108,15 @@ fun computeMaxGradError(useRope: Boolean = false): Double {
 }
 
 fun gradCheck() {
-    for ((label, useRope) in listOf("learned pos" to false, "RoPE" to true)) {
-        val maxRel = computeMaxGradError(useRope)
+    val cases = listOf(
+        Triple("learned pos", false, false),
+        Triple("RoPE", true, false),
+        Triple("tied weights", false, true),
+    )
+    for ((label, useRope, tie) in cases) {
+        val maxRel = computeMaxGradError(useRope, tie)
         val verdict = if (maxRel < 1e-4) "PASS" else "FAIL"
-        println("Gradient check [%-11s]: max relative error = %.2e  $verdict".format(label, maxRel))
+        println("Gradient check [%-12s]: max relative error = %.2e  $verdict".format(label, maxRel))
     }
     println()
 }
@@ -258,9 +266,11 @@ fun cmdTrain(cli: Cli) {
         nHead = cli.int("heads", 4),
         nLayer = cli.int("layers", 2),
         useRope = useRope,
+        tieWeights = cli.flag("tie"),
+        dropout = cli.dbl("dropout", 0.0),
     )
     val out = cli.str("out", "model.bin")
-    println("training: tok=$kind rope=$useRope embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} block=${cfg.blockSize}")
+    println("training: tok=$kind rope=$useRope tie=${cfg.tieWeights} dropout=${cfg.dropout} embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} block=${cfg.blockSize} params=${GPT(cfg).parameters().sumOf { it.data.size }}")
     val model = trainModel(
         tok, text,
         steps = cli.int("steps", 1500), batch = cli.int("batch", 12),
@@ -381,6 +391,8 @@ fun printHelp() {
             --data <file>     text corpus (default: built-in toy corpus)
             --tok char|bpe    tokenizer (default: char)
             --rope            rotary positions instead of a learned table
+            --tie             tie the output projection to the token embedding
+            --dropout F       dropout probability, training only (default: 0)
             --embed N (64)    --heads N (4)   --layers N (2)   --block N
             --steps N (1500)  --batch N (12)  --lr F (0.003)
             --out <file>      checkpoint path (default: model.bin)

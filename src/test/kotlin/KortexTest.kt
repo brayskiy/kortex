@@ -40,12 +40,81 @@ class KortexTest {
         }
     }
 
+    /** Backprop stays correct with weights tied (tokEmb feeds two paths). */
+    @Test
+    fun backpropMatchesNumericalGradients_tied() {
+        assertTrue(computeMaxGradError(tie = true) < 1e-4)
+    }
+
+    /** Tying removes exactly the separate output head (vocab x nEmbed params). */
+    @Test
+    fun weightTyingDropsTheHead() {
+        val base = Config(vocabSize = 30, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 1)
+        val tied = base.copy(tieWeights = true)
+        val pBase = GPT(base, seed = 1).parameters().sumOf { it.data.size }
+        val pTied = GPT(tied, seed = 1).parameters().sumOf { it.data.size }
+        assertEquals(base.vocabSize * base.nEmbed, pBase - pTied)
+        assertEquals(null, GPT(tied, seed = 1).head)
+    }
+
+    /** A tied model must round-trip through a checkpoint too. */
+    @Test
+    fun tiedCheckpointRoundTrips() {
+        val tok = CharTokenizer(corpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 1, tieWeights = true)
+        val model = trainModel(tok, corpus(), steps = 20, cfg = cfg, verbose = false)
+        val ids = tok.encode(corpus()).copyOfRange(0, cfg.blockSize)
+        val before = model.forward(ids)
+        val file = File.createTempFile("kortex-tied", ".bin").apply { deleteOnExit() }
+        Checkpoint.save(file.path, cfg, model, tok)
+        val (loaded, _) = Checkpoint.load(file.path)
+        val after = loaded.forward(ids)
+        for (i in before.data.indices) assertTrue(Math.abs(before.data[i] - after.data[i]) < 1e-12)
+    }
+
+    /** Dropout's backward must match finite differences (fixed mask via reseed). */
+    @Test
+    fun dropoutBackpropIsCorrect() {
+        val n = 8
+        val x = Tensor(1, n)
+        val init = Random(1); for (i in 0 until n) x.data[i] = init.nextGaussian()
+        val ones = Tensor(n, 1).also { it.data.fill(1.0) }
+        // Reseeding Random(42) each call makes the mask identical -> deterministic.
+        fun loss(): Tensor = Tensor.dropout(x, 0.5, training = true, rng = Random(42)) matmul ones
+
+        x.grad.fill(0.0); loss().backward()
+        val eps = 1e-5; var maxRel = 0.0
+        for (i in 0 until n) {
+            val o = x.data[i]
+            x.data[i] = o + eps; val lp = loss().data[0]
+            x.data[i] = o - eps; val lm = loss().data[0]
+            x.data[i] = o
+            val num = (lp - lm) / (2 * eps)
+            maxRel = maxOf(maxRel, Math.abs(x.grad[i] - num) / (Math.abs(x.grad[i]) + Math.abs(num) + 1e-9))
+        }
+        assertTrue(maxRel < 1e-4, "dropout gradient error too high: $maxRel")
+    }
+
+    /** Dropout is a no-op at eval (training=false) and identity when p=0. */
+    @Test
+    fun dropoutIsIdentityAtEval() {
+        val x = Tensor(2, 3).also { for (i in it.data.indices) it.data[i] = i + 1.0 }
+        val evalOut = Tensor.dropout(x, 0.5, training = false, rng = Random(0))
+        val zeroOut = Tensor.dropout(x, 0.0, training = true, rng = Random(0))
+        for (i in x.data.indices) {
+            assertEquals(x.data[i], evalOut.data[i])
+            assertEquals(x.data[i], zeroOut.data[i])
+        }
+    }
+
     /** KV-cache decoding must reproduce the full forward pass's logits. */
     @Test
     fun kvCacheMatchesFullForward() {
-        for (useRope in listOf(false, true)) {
+        // Cover learned/RoPE positions and the tied output projection.
+        val variants = listOf(Pair(false, false), Pair(true, false), Pair(false, true))
+        for ((useRope, tie) in variants) {
             val tok = CharTokenizer(corpus())
-            val cfg = Config(vocabSize = tok.vocabSize, blockSize = 12, nEmbed = 24, nHead = 3, nLayer = 2, useRope = useRope)
+            val cfg = Config(vocabSize = tok.vocabSize, blockSize = 12, nEmbed = 24, nHead = 3, nLayer = 2, useRope = useRope, tieWeights = tie)
             val model = trainModel(tok, corpus(), steps = 40, cfg = cfg, verbose = false)
             val ids = tok.encode(corpus()).copyOfRange(0, cfg.blockSize)
 
@@ -55,7 +124,7 @@ class KortexTest {
                 val step = gen.step(ids[t])            // logits after feeding token t
                 for (j in 0 until cfg.vocabSize) {
                     val diff = Math.abs(full.at(t, j) - step[j])
-                    assertTrue(diff < 1e-6, "rope=$useRope mismatch at t=$t j=$j: $diff")
+                    assertTrue(diff < 1e-6, "rope=$useRope tie=$tie mismatch at t=$t j=$j: $diff")
                 }
             }
         }

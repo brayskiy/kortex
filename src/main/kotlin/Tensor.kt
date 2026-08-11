@@ -333,6 +333,27 @@ class Tensor(
             }
         }
 
+        /**
+         * Dropout: during training, zero each element with probability p and scale
+         * the survivors by 1/(1-p) so the expected sum is unchanged ("inverted
+         * dropout"). At eval time (training=false) it's the identity. Randomly
+         * dropping units stops the network from over-relying on any one of them.
+         */
+        fun dropout(x: Tensor, p: Double, training: Boolean, rng: Random): Tensor {
+            if (!training || p <= 0.0) return x
+            val scale = 1.0 / (1.0 - p)
+            val mask = DoubleArray(x.data.size)
+            val out = Tensor(x.rows, x.cols)
+            for (i in x.data.indices) {
+                val m = if (rng.nextDouble() >= p) scale else 0.0
+                mask[i] = m
+                out.data[i] = x.data[i] * m
+            }
+            return out.build(listOf(x)) {
+                for (i in x.data.indices) x.grad[i] += out.grad[i] * mask[i]
+            }
+        }
+
         /** A parameter (leaf) tensor initialized with small random values. */
         fun param(rows: Int, cols: Int, rng: Random, std: Double = 0.02): Tensor {
             val t = Tensor(rows, cols)

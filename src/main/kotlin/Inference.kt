@@ -55,7 +55,20 @@ class KVGenerator(private val model: GPT) {
         }
         val xf = layerNorm(x, model.lnFg.data, model.lnFb.data)
         length++
-        return matVec(xf, model.head.data, d, cfg.vocabSize)
+        val head = model.head
+        return if (head != null) matVec(xf, head.data, d, cfg.vocabSize)
+        else tiedLogits(xf)   // weight tying: logit_o = xf · tokEmb_row_o
+    }
+
+    /** Output logits when weights are tied: dot xf with each token's embedding. */
+    private fun tiedLogits(xf: DoubleArray): DoubleArray {
+        val te = model.tokEmb.data
+        return DoubleArray(cfg.vocabSize) { o ->
+            var s = 0.0
+            val row = o * d
+            for (j in 0 until d) s += xf[j] * te[row + j]
+            s
+        }
     }
 
     private fun attention(l: Int, x: DoubleArray, pos: Int): DoubleArray {
