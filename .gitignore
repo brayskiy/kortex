@@ -1,0 +1,20 @@
+# Build output
+build/
+.gradle/
+out/
+bin/
+
+# Generated artifacts
+*.jar
+attention.html
+
+# Keep the Gradle wrapper jar (needed to bootstrap ./gradlew)
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
