@@ -33,6 +33,8 @@ positions ─► pos embedding┘
 | `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
 | `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, temperature sampling, and the **CLI** (`train`/`generate`/`chat`). |
 | `src/main/kotlin/Checkpoint.kt` | **Save / load** — serialize a trained model (config + tokenizer + weights) to one file and reload it. |
+| `src/main/kotlin/Sampling.kt` | **Sampling** — turn logits into a token with temperature, **top-k**, and **top-p** (nucleus). |
+| `src/main/kotlin/Inference.kt` | **KV-cache** — fast decoding that caches past keys/values instead of recomputing the whole context each step. |
 | `src/main/kotlin/Viz.kt` | **Attention visualizer** — renders each head's attention matrix as ASCII + an HTML heatmap, so you can *see* which tokens attend to which. |
 | `src/test/kotlin/KortexTest.kt` | **Tests** — `./gradlew test` checks backprop, tokenizer round-trips, attention causality, and that training lowers the loss. |
 
@@ -80,13 +82,34 @@ $BIN train --data mytext.txt --embed 96 --layers 3 # your own corpus, bigger mod
 
 # One-shot continuation from a saved model:
 $BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8
+$BIN generate --model model.bin --prompt "the" --top-k 1            # greedy
+$BIN generate --model model.bin --prompt "the" --temp 1.0 --top-p 0.9   # nucleus
+$BIN generate --model model.bin --prompt "the" --kv                 # KV-cache path
 
 # Interactive REPL — type a prompt, it continues it:
 $BIN chat --model model.bin
 #   > to be
 #   to be that is the question. all that glitters is not gold...
-#   Commands inside chat:  :temp 0.4   :tokens 80   :quit
+#   Commands inside chat:  :temp 0.4   :top-k 5   :top-p 0.9   :tokens 80   :quit
 ```
+
+**Sampling knobs** (all optional): `--temp` scales randomness (→0 greedy, >1 wild);
+`--top-k N` samples only from the N most likely tokens; `--top-p F` (nucleus) keeps
+the most likely tokens summing to probability F. top-k and top-p compose.
+
+**KV-cache & speed.** `--kv` decodes with a key/value cache instead of recomputing
+the whole context each step — same output, far less work. See it yourself:
+
+```bash
+$BIN bench --block 160 --embed 128 --layers 4
+#   full recompute :  14847.6 ms  (11 tok/s)
+#   KV-cache       :    112.3 ms  (1424 tok/s)
+#   speedup        : 132.2x
+#   outputs identical: true
+```
+
+(The KV path is bounded by the model's context window; for longer sliding-window
+output, drop `--kv` and use the default generator.)
 
 `$BIN help` lists every command and flag. Prefer no build step? `./gradlew run
 --args="train --steps 800 --out model.bin"` works for one-shot commands (use the

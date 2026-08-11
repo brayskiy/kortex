@@ -45,28 +45,18 @@ class Adam(private val params: List<Tensor>, private val lr: Double = 3e-3) {
     }
 }
 
-/** Draw one token id from a probability distribution (with temperature). */
-fun sample(logits: DoubleArray, temperature: Double, rng: Random): Int {
-    val n = logits.size
-    val p = DoubleArray(n)
-    var mx = Double.NEGATIVE_INFINITY
-    for (x in logits) mx = maxOf(mx, x)
-    var sum = 0.0
-    for (i in 0 until n) { val e = Math.exp((logits[i] - mx) / temperature); p[i] = e; sum += e }
-    var r = rng.nextDouble() * sum
-    for (i in 0 until n) { r -= p[i]; if (r <= 0) return i }
-    return n - 1
-}
-
-/** Autoregressive generation: feed the model its own output, one token at a time. */
-fun generate(model: GPT, tok: Tokenizer, prompt: String, maxNew: Int, temperature: Double, rng: Random): String {
+/**
+ * Autoregressive generation (sliding window): feed the model its own output one
+ * token at a time. Recomputes the full context each step; use `generateKV`
+ * (Inference.kt) for the faster KV-cache path within one context window.
+ */
+fun generate(model: GPT, tok: Tokenizer, prompt: String, maxNew: Int, sampler: Sampler, rng: Random): String {
     var ids = tok.encode(prompt.ifEmpty { " " })
     for (step in 0 until maxNew) {
         val context = if (ids.size <= model.cfg.blockSize) ids else ids.copyOfRange(ids.size - model.cfg.blockSize, ids.size)
         val logits = model.forward(context)
         val last = DoubleArray(model.cfg.vocabSize) { logits.at(context.size - 1, it) }
-        val next = sample(last, temperature, rng)
-        ids = ids + next
+        ids = ids + sampleFrom(last, sampler, rng)
     }
     return tok.decode(ids)
 }
@@ -182,7 +172,7 @@ fun train(kind: String, useRope: Boolean) {
     val rng = Random(7)
     println("\n--- samples (temperature 0.8) ---")
     for (prompt in listOf("to be", "the ", "knowledge")) {
-        println("[$prompt] -> ${generate(model, tok, prompt, maxNew = 60, temperature = 0.8, rng = rng)}")
+        println("[$prompt] -> ${generate(model, tok, prompt, maxNew = 60, sampler = Sampler(0.8), rng = rng)}")
     }
 }
 
@@ -281,9 +271,16 @@ fun cmdTrain(cli: Cli) {
     runCatching {
         val seed = if (dataPath == null) "to be" else " "
         println("--- sample ---")
-        println(generate(model, tok, seed, maxNew = 80, temperature = 0.8, rng = Random(7)))
+        println(generate(model, tok, seed, maxNew = 80, sampler = Sampler(0.8), rng = Random(7)))
     }.onFailure { println("(sample skipped: ${it.message})") }
 }
+
+/** Build a Sampler from --temp / --top-k / --top-p flags. */
+fun samplerFrom(cli: Cli) = Sampler(
+    temperature = cli.dbl("temp", 0.8),
+    topK = cli.int("top-k", 0),
+    topP = cli.dbl("top-p", 1.0),
+)
 
 /** generate: load a saved model and continue a prompt once. */
 fun cmdGenerate(cli: Cli) {
@@ -291,8 +288,13 @@ fun cmdGenerate(cli: Cli) {
     if (!File(path).exists()) { System.err.println("No model at '$path'. Train one first: train --out $path"); return }
     val (model, tok) = Checkpoint.load(path)
     val prompt = cli.strOrNull("prompt") ?: cli.positionals.joinToString(" ")
+    val sampler = samplerFrom(cli)
+    val tokens = cli.int("tokens", 200)
+    val rng = Random(cli.long("seed", 42))
     runCatching {
-        generate(model, tok, prompt, maxNew = cli.int("tokens", 200), temperature = cli.dbl("temp", 0.8), rng = Random(cli.long("seed", 42)))
+        // --kv uses the KV-cache path (bounded by the context window).
+        if (cli.flag("kv")) generateKV(model, tok, prompt, tokens, sampler, rng)
+        else generate(model, tok, prompt, tokens, sampler, rng)
     }.onSuccess { println(it) }
         .onFailure { System.err.println("Cannot encode prompt (a character isn't in the model's vocab): ${it.message}") }
 }
@@ -303,10 +305,11 @@ fun cmdChat(cli: Cli) {
     if (!File(path).exists()) { System.err.println("No model at '$path'. Train one first: train --out $path"); return }
     val (model, tok) = Checkpoint.load(path)
     var tokens = cli.int("tokens", 120)
-    var temp = cli.dbl("temp", 0.8)
+    var sampler = samplerFrom(cli)
+    val useKv = cli.flag("kv")
     val rng = Random(cli.long("seed", 42))
     println("Kortex chat — type a prompt; the model continues it. (A tiny char/BPE LM, not an assistant.)")
-    println("Commands:  :temp <x>   :tokens <n>   :quit")
+    println("Commands:  :temp <x>   :top-k <n>   :top-p <x>   :tokens <n>   :quit")
     while (true) {
         print("\n> "); System.out.flush()
         val line = readLine() ?: break
@@ -314,14 +317,56 @@ fun cmdChat(cli: Cli) {
         when {
             s == ":quit" || s == ":q" -> break
             s.isEmpty() -> {}
-            s.startsWith(":temp") -> { temp = s.removePrefix(":temp").trim().toDoubleOrNull() ?: temp; println("temperature=$temp") }
+            s.startsWith(":temp") -> { sampler = sampler.copy(temperature = s.removePrefix(":temp").trim().toDoubleOrNull() ?: sampler.temperature); println("$sampler") }
+            s.startsWith(":top-k") -> { sampler = sampler.copy(topK = s.removePrefix(":top-k").trim().toIntOrNull() ?: sampler.topK); println("$sampler") }
+            s.startsWith(":top-p") -> { sampler = sampler.copy(topP = s.removePrefix(":top-p").trim().toDoubleOrNull() ?: sampler.topP); println("$sampler") }
             s.startsWith(":tokens") -> { tokens = s.removePrefix(":tokens").trim().toIntOrNull() ?: tokens; println("tokens=$tokens") }
-            else -> runCatching { generate(model, tok, s, tokens, temp, rng) }
+            else -> runCatching { if (useKv) generateKV(model, tok, s, tokens, sampler, rng) else generate(model, tok, s, tokens, sampler, rng) }
                 .onSuccess { println(it) }
                 .onFailure { println("(can't encode that — a character isn't in the model's vocab)") }
         }
     }
     println("bye")
+}
+
+/** bench: measure KV-cache vs. full-recompute decoding on a random-init model. */
+fun cmdBench(cli: Cli) {
+    val cfg = Config(
+        vocabSize = cli.int("vocab", 96),
+        blockSize = cli.int("block", 128),
+        nEmbed = cli.int("embed", 128),
+        nHead = cli.int("heads", 4),
+        nLayer = cli.int("layers", 4),
+        useRope = cli.flag("rope"),
+    )
+    val model = GPT(cfg, seed = 1)
+    val n = cfg.blockSize
+    println("bench: block=$n embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} rope=${cfg.useRope}")
+    println("decoding $n tokens (greedy)...")
+
+    // Full recompute: re-run the whole context every step.
+    var t0 = System.nanoTime()
+    val full = ArrayList<Int>(); full.add(0)
+    while (full.size < n) {
+        val logits = model.forward(full.toIntArray())
+        val last = DoubleArray(cfg.vocabSize) { logits.at(full.size - 1, it) }
+        full.add(argmax(last))
+    }
+    val fullMs = (System.nanoTime() - t0) / 1e6
+
+    // KV-cache: each step is O(t) dot-products over cached keys/values.
+    t0 = System.nanoTime()
+    val gen = KVGenerator(model)
+    val kv = ArrayList<Int>(); kv.add(0)
+    var logits = gen.step(0)
+    while (gen.length < n) { val nx = argmax(logits); kv.add(nx); if (gen.length >= n) break; logits = gen.step(nx) }
+    val kvMs = (System.nanoTime() - t0) / 1e6
+
+    val match = full == kv
+    println("full recompute : %8.1f ms  (%.0f tok/s)".format(fullMs, n / (fullMs / 1000)))
+    println("KV-cache       : %8.1f ms  (%.0f tok/s)".format(kvMs, n / (kvMs / 1000)))
+    println("speedup        : %.1fx".format(fullMs / kvMs))
+    println("outputs identical: $match")
 }
 
 fun printHelp() {
@@ -342,10 +387,15 @@ fun printHelp() {
 
           generate     Continue a prompt once, using a saved model.
             --model <file> (model.bin)  --prompt "text"  --tokens N (200)
-            --temp F (0.8)              --seed N (42)
+            --temp F (0.8)   --top-k N (off)   --top-p F (off)   --seed N (42)
+            --kv            use the KV-cache path (bounded by the context window)
 
           chat         Interactive REPL over a saved model (reads stdin).
-            --model <file> (model.bin)  --tokens N (120)  --temp F (0.8)
+            --model <file> (model.bin)  --tokens N (120)  --kv
+            --temp F   --top-k N   --top-p F   (also as :commands inside chat)
+
+          bench        KV-cache vs. full-recompute decoding speed (random model).
+            --block N (128)  --embed N (128)  --heads N (4)  --layers N (4)  --rope
 
           gradcheck    Verify backprop (learned + RoPE).
           attn [char|bpe] [--rope]      Train small, visualize attention -> attention.html
@@ -361,6 +411,7 @@ fun main(args: Array<String>) {
         "train" -> cmdTrain(cli)
         "generate" -> cmdGenerate(cli)
         "chat" -> cmdChat(cli)
+        "bench" -> cmdBench(cli)
         "gradcheck" -> gradCheck()
         "attn" -> attnMode(cli.pos(1, "char"), cli.flag("rope"))
         "poscompare" -> posCompare(cli.pos(1, "char"))

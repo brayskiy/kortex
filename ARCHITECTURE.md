@@ -93,7 +93,9 @@ Chosen for readability, not performance or SOTA quality:
 - Scalar `Double` math in plain loops — no vectorization, no GPU, no threading.
 - One sequence per forward pass (no batched tensor dimension).
 - BPE has no word-boundary pre-tokenization (whole-corpus merges).
-- Positions for a window are `0..T-1` (no KV-cache; each step re-encodes context).
+- Positions for a window are `0..T-1`. Training re-encodes the full context each
+  step; generation can use the KV-cache (`Inference.kt`) for O(t)-per-step decoding
+  within one context window.
 - Weights are not tied between `tokEmb` and `head`.
 
 ## How to trust changes
