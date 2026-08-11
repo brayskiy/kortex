@@ -1,0 +1,62 @@
+name: Release
+
+# main is only ever updated by merging develop (enforced by branch protection
+# + branch-policy), so any push to main is a release. Tag it and publish a
+# GitHub Release with auto-generated notes.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # needed to create tags and releases
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history + tags
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        run: |
+          git fetch --tags --force
+          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          msg=$(git log -1 --format=%B)
+          if [ -z "$latest" ]; then
+            next="v0.1.0"                       # first release
+          else
+            v=${latest#v}; IFS=. read -r MA MI PA <<< "$v"
+            # Bump level from the merge commit message: [major] > [minor] > patch.
+            if printf '%s' "$msg" | grep -qiE '\[major\]'; then
+              MA=$((MA+1)); MI=0; PA=0
+            elif printf '%s' "$msg" | grep -qiE '\[minor\]'; then
+              MI=$((MI+1)); PA=0
+            else
+              PA=$((PA+1))
+            fi
+            next="v$MA.$MI.$PA"
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Next release: $next (previous: ${latest:-none})"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          if git rev-parse "$NEXT" >/dev/null 2>&1; then
+            echo "Tag $NEXT already exists; skipping."
+            exit 0
+          fi
+          gh release create "$NEXT" \
+            --target "${{ github.sha }}" \
+            --title "$NEXT" \
+            --generate-notes
+          echo "Published release $NEXT"

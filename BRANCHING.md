@@ -47,6 +47,20 @@ gh pr create --base main --head develop --title "Release"
 gh pr merge --merge        # allowed only from develop, only if tests pass
 ```
 
+## Releases
+
+When a `develop → main` PR merges, **[release.yml](.github/workflows/release.yml)**
+automatically tags a semver release and publishes a GitHub Release with
+auto-generated notes. The bump is derived from the release PR's title:
+
+| Marker in PR title | Result (from `vX.Y.Z`) |
+|--------------------|------------------------|
+| _(none)_           | patch → `vX.Y.(Z+1)`   |
+| `[minor]`          | `vX.(Y+1).0`           |
+| `[major]`          | `v(X+1).0.0`           |
+
+The first release is `v0.1.0`. Tags are created on `main`; no manual tagging needed.
+
 ## Reviews and housekeeping
 
 - **[CODEOWNERS](.github/CODEOWNERS)** auto-requests the owner as reviewer on
