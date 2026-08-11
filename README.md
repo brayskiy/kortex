@@ -1,5 +1,8 @@
 # minllm — a minimalistic LLM in Kotlin (from scratch)
 
+<!-- After pushing to GitHub, replace OWNER/REPO to activate this badge. -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
 A tiny **GPT** (decoder-only transformer) written in pure Kotlin — no ML
 libraries, no linear-algebra dependencies. Every algorithm an LLM relies on is
 here in readable form: tokenization, embeddings, self-attention,
