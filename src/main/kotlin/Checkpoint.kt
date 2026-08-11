@@ -16,7 +16,7 @@ import java.io.File
 
 object Checkpoint {
     private const val MAGIC = 0x4B525458   // "KRTX"
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun save(path: String, cfg: Config, model: GPT, tok: Tokenizer) {
         DataOutputStream(BufferedOutputStream(File(path).outputStream())).use { o ->
@@ -24,6 +24,7 @@ object Checkpoint {
             o.writeInt(cfg.vocabSize); o.writeInt(cfg.blockSize)
             o.writeInt(cfg.nEmbed); o.writeInt(cfg.nHead); o.writeInt(cfg.nLayer)
             o.writeBoolean(cfg.useRope)
+            o.writeBoolean(cfg.tieWeights); o.writeDouble(cfg.dropout)
             tok.save(o)
             val ps = model.parameters()
             o.writeInt(ps.size)
@@ -44,6 +45,7 @@ object Checkpoint {
                 vocabSize = i.readInt(), blockSize = i.readInt(),
                 nEmbed = i.readInt(), nHead = i.readInt(), nLayer = i.readInt(),
                 useRope = i.readBoolean(),
+                tieWeights = i.readBoolean(), dropout = i.readDouble(),
             )
             val tok = loadTokenizer(i)
             val model = GPT(cfg)
