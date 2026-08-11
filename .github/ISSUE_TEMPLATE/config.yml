@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/brayskiy/kortex/blob/main/CONTRIBUTING.md
+    about: How to build, test, and add a differentiable op that passes the gradient check.
+  - name: Architecture overview
+    url: https://github.com/brayskiy/kortex/blob/main/ARCHITECTURE.md
+    about: How the pieces fit together before filing a design question.
