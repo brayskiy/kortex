@@ -6,6 +6,7 @@ bin/
 
 # Generated artifacts
 *.jar
+*.bin
 attention.html
 
 # Keep the Gradle wrapper jar (needed to bootstrap ./gradlew)
