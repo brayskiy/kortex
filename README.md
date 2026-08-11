@@ -20,6 +20,7 @@ positions ─► pos embedding┘
 > data/shape flow, the autograd design), **[CONTRIBUTING.md](CONTRIBUTING.md)**
 > (build/test, and how to add a differentiable op that passes the gradient check),
 > and **[BRANCHING.md](BRANCHING.md)** (the `work → develop → main` PR flow).
+> Release history is in **[CHANGELOG.md](CHANGELOG.md)** (auto-generated from releases).
 
 ---
 
