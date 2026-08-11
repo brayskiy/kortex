@@ -1,4 +1,4 @@
-# minllm — a minimalistic LLM in Kotlin (from scratch)
+# Kortex — a minimalistic LLM in Kotlin (from scratch)
 
 <!-- After pushing to GitHub, replace OWNER/REPO to activate this badge. -->
 [![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
@@ -28,7 +28,7 @@ positions ─► pos embedding┘
 | `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
 | `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, and text generation (temperature sampling). |
 | `src/main/kotlin/Viz.kt` | **Attention visualizer** — renders each head's attention matrix as ASCII + an HTML heatmap, so you can *see* which tokens attend to which. |
-| `src/test/kotlin/MinllmTest.kt` | **Tests** — `./gradlew test` checks backprop, tokenizer round-trips, attention causality, and that training lowers the loss. |
+| `src/test/kotlin/KortexTest.kt` | **Tests** — `./gradlew test` checks backprop, tokenizer round-trips, attention causality, and that training lowers the loss. |
 
 ---
 
@@ -53,7 +53,7 @@ just a JDK 17+; developed on JDK 21). The first run downloads Kotlin.
 ./gradlew test
 ```
 
-### Tests (`src/test/kotlin/MinllmTest.kt`)
+### Tests (`src/test/kotlin/KortexTest.kt`)
 
 `./gradlew test` (JUnit 5) asserts the properties everything depends on:
 
@@ -66,7 +66,7 @@ just a JDK 17+; developed on JDK 21). The first run downloads Kotlin.
 | `trainingReducesLoss` | a short training run lowers the loss |
 
 Prefer plain Kotlin? It still compiles directly:
-`kotlinc src/main/kotlin/*.kt -include-runtime -d minllm.jar && java -jar minllm.jar train char`
+`kotlinc src/main/kotlin/*.kt -include-runtime -d kortex.jar && java -jar kortex.jar train char`
 
 ### What training looks like
 

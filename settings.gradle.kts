@@ -1,1 +1,1 @@
-rootProject.name = "minllm"
+rootProject.name = "kortex"

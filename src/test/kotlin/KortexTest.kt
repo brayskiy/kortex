@@ -1,5 +1,5 @@
 /*
- * MinllmTest.kt — automated checks run by `./gradlew test`.
+ * KortexTest.kt — automated checks run by `./gradlew test`.
  *
  * These assert the properties the whole thing depends on:
  *   - backprop matches finite-difference gradients (the math is right)
@@ -13,7 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-class MinllmTest {
+class KortexTest {
 
     /** Backprop is correct if analytic gradients match numerical ones. */
     @Test
