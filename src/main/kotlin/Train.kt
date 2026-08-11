@@ -76,7 +76,12 @@ fun generate(model: GPT, tok: Tokenizer, prompt: String, maxNew: Int, temperatur
  * autograd engine and every op's backward are correct. This is how you *trust*
  * a hand-written neural net.
  */
-fun gradCheck() {
+/**
+ * Compute the max relative error between analytic gradients (backward()) and
+ * finite differences over a spot-check of parameters. Small error => backprop
+ * is correct. Pure/deterministic so tests can assert on it.
+ */
+fun computeMaxGradError(): Double {
     val text = "hello world, transformers!"
     val tok = CharTokenizer(text)
     val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2)
@@ -105,6 +110,11 @@ fun gradCheck() {
             maxRel = maxOf(maxRel, rel)
         }
     }
+    return maxRel
+}
+
+fun gradCheck() {
+    val maxRel = computeMaxGradError()
     println("Gradient check: max relative error = %.2e".format(maxRel))
     println(if (maxRel < 1e-4) "PASS — backprop is correct.\n" else "FAIL — check the op backwards.\n")
 }
