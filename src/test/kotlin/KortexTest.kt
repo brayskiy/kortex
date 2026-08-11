@@ -10,11 +10,56 @@
  */
 
 import java.io.File
+import java.util.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class KortexTest {
+
+    /** top-k=1 and top-p→0 must both collapse to greedy (the argmax token). */
+    @Test
+    fun topKAndTopPRestrictToArgmax() {
+        val logits = doubleArrayOf(0.1, 3.0, 0.2, 2.9, -1.0)   // argmax = index 1
+        val rng = Random(123)
+        repeat(200) {
+            assertEquals(1, sampleFrom(logits, Sampler(temperature = 1.0, topK = 1), rng))
+            assertEquals(1, sampleFrom(logits, Sampler(temperature = 1.0, topP = 1e-6), rng))
+        }
+    }
+
+    /** top-k must never return a token outside the k highest-logit set. */
+    @Test
+    fun topKNeverPicksOutsideTheTopK() {
+        val logits = doubleArrayOf(5.0, 4.0, -2.0, -3.0, 0.0, 1.0)
+        val allowed = setOf(0, 1, 5)   // three largest
+        val rng = Random(7)
+        repeat(500) {
+            val pick = sampleFrom(logits, Sampler(temperature = 1.0, topK = 3), rng)
+            assertTrue(pick in allowed, "top-k picked $pick outside $allowed")
+        }
+    }
+
+    /** KV-cache decoding must reproduce the full forward pass's logits. */
+    @Test
+    fun kvCacheMatchesFullForward() {
+        for (useRope in listOf(false, true)) {
+            val tok = CharTokenizer(corpus())
+            val cfg = Config(vocabSize = tok.vocabSize, blockSize = 12, nEmbed = 24, nHead = 3, nLayer = 2, useRope = useRope)
+            val model = trainModel(tok, corpus(), steps = 40, cfg = cfg, verbose = false)
+            val ids = tok.encode(corpus()).copyOfRange(0, cfg.blockSize)
+
+            val full = model.forward(ids)              // (T x vocab): row t = logits after token t
+            val gen = KVGenerator(model)
+            for (t in ids.indices) {
+                val step = gen.step(ids[t])            // logits after feeding token t
+                for (j in 0 until cfg.vocabSize) {
+                    val diff = Math.abs(full.at(t, j) - step[j])
+                    assertTrue(diff < 1e-6, "rope=$useRope mismatch at t=$t j=$j: $diff")
+                }
+            }
+        }
+    }
 
     /** A saved model must reload to bit-identical predictions. */
     @Test
