@@ -17,8 +17,9 @@ positions ─► pos embedding┘
 ```
 
 > Deeper dives: **[ARCHITECTURE.md](ARCHITECTURE.md)** (how it fits together,
-> data/shape flow, the autograd design) and **[CONTRIBUTING.md](CONTRIBUTING.md)**
-> (build/test, and how to add a differentiable op that passes the gradient check).
+> data/shape flow, the autograd design), **[CONTRIBUTING.md](CONTRIBUTING.md)**
+> (build/test, and how to add a differentiable op that passes the gradient check),
+> and **[BRANCHING.md](BRANCHING.md)** (the `work → develop → main` PR flow).
 
 ---
 
