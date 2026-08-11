@@ -1,0 +1,10 @@
+# Code owners for Kortex.
+# Owners are automatically requested for review on pull requests that touch
+# matching paths. See https://docs.github.com/articles/about-code-owners
+#
+# Review approvals are NOT required to merge (single-maintainer repo); this file
+# just auto-requests review and documents ownership. Merges are gated on the
+# `test` and `branch-policy` checks instead.
+
+# Default owner for everything in the repository.
+*       @brayskiy
