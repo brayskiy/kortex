@@ -70,6 +70,24 @@ class KortexTest {
         }
     }
 
+    /** The RoPE rotation must backprop correctly too. */
+    @Test
+    fun backpropMatchesNumericalGradients_rope() {
+        val err = computeMaxGradError(useRope = true)
+        assertTrue(err < 1e-4, "RoPE gradient check max relative error too high: $err")
+    }
+
+    /** RoPE injects position by rotation, so it needs no learned position table. */
+    @Test
+    fun ropeDropsThePositionTable() {
+        val learned = Config(vocabSize = 30, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 1)
+        val rope = learned.copy(useRope = true)
+        val pLearned = GPT(learned, seed = 1).parameters().sumOf { it.data.size }
+        val pRope = GPT(rope, seed = 1).parameters().sumOf { it.data.size }
+        assertEquals(learned.blockSize * learned.nEmbed, pLearned - pRope,
+            "RoPE should save exactly the position-embedding table")
+    }
+
     @Test
     fun trainingReducesLoss() {
         val text = corpus()

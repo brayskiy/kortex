@@ -25,12 +25,14 @@ data class Config(
     val nEmbed: Int = 64,      // embedding / hidden dimension
     val nHead: Int = 4,        // number of attention heads
     val nLayer: Int = 2,       // number of transformer blocks
+    val useRope: Boolean = false, // rotary positions instead of a learned table
 )
 
 /** A single causal multi-head self-attention layer. */
 class Attention(cfg: Config, rng: Random) {
     val nHead = cfg.nHead
     val headDim = cfg.nEmbed / cfg.nHead
+    val useRope = cfg.useRope
     val wq = Tensor.param(cfg.nEmbed, cfg.nEmbed, rng)
     val wk = Tensor.param(cfg.nEmbed, cfg.nEmbed, rng)
     val wv = Tensor.param(cfg.nEmbed, cfg.nEmbed, rng)
@@ -46,9 +48,11 @@ class Attention(cfg: Config, rng: Random) {
         val heads = ArrayList<Tensor>(nHead)
         for (h in 0 until nHead) {
             val c0 = h * headDim; val c1 = c0 + headDim
-            val qh = q.sliceCols(c0, c1)
-            val kh = k.sliceCols(c0, c1)
+            var qh = q.sliceCols(c0, c1)
+            var kh = k.sliceCols(c0, c1)
             val vh = v.sliceCols(c0, c1)
+            // RoPE injects position by rotating queries and keys (not values).
+            if (useRope) { qh = Tensor.rope(qh); kh = Tensor.rope(kh) }
             // Affinity of every token to every other token, then mask the future.
             var scores = (qh matmul kh.transpose()).scale(scale)   // (T x T)
             scores = Tensor.causalMask(scores)
@@ -112,19 +116,21 @@ class Block(cfg: Config, rng: Random) {
 class GPT(val cfg: Config, seed: Long = 1234L) {
     private val rng = Random(seed)
     val tokEmb = Tensor.param(cfg.vocabSize, cfg.nEmbed, rng)   // one vector per token id
-    val posEmb = Tensor.param(cfg.blockSize, cfg.nEmbed, rng)   // one vector per position
+    // Learned absolute positions live in a table; RoPE needs none (it rotates
+    // Q/K inside attention instead), so we don't allocate one.
+    val posEmb: Tensor? = if (cfg.useRope) null else Tensor.param(cfg.blockSize, cfg.nEmbed, rng)
     val blocks = List(cfg.nLayer) { Block(cfg, rng) }
     val lnFg = Block.ones(cfg.nEmbed); val lnFb = Tensor.zeros(1, cfg.nEmbed)
     val head = Tensor.param(cfg.nEmbed, cfg.vocabSize, rng)     // hidden -> vocab logits
 
     fun parameters(): List<Tensor> =
-        listOf(tokEmb, posEmb, lnFg, lnFb, head) + blocks.flatMap { it.params() }
+        listOfNotNull(tokEmb, posEmb, lnFg, lnFb, head) + blocks.flatMap { it.params() }
 
     /** Forward pass for one sequence of token ids -> logits (T x vocab). */
     fun forward(idx: IntArray, sink: AttnSink? = null): Tensor {
         val t = idx.size
-        val pos = IntArray(t) { it }
-        var x = Tensor.gatherRows(tokEmb, idx) + Tensor.gatherRows(posEmb, pos)
+        var x = Tensor.gatherRows(tokEmb, idx)
+        if (posEmb != null) x = x + Tensor.gatherRows(posEmb, IntArray(t) { it })
         for ((layer, b) in blocks.withIndex()) x = b.forward(x, sink, layer)
         x = Tensor.layerNorm(x, lnFg, lnFb)
         return x matmul head

@@ -81,10 +81,10 @@ fun generate(model: GPT, tok: Tokenizer, prompt: String, maxNew: Int, temperatur
  * finite differences over a spot-check of parameters. Small error => backprop
  * is correct. Pure/deterministic so tests can assert on it.
  */
-fun computeMaxGradError(): Double {
+fun computeMaxGradError(useRope: Boolean = false): Double {
     val text = "hello world, transformers!"
     val tok = CharTokenizer(text)
-    val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2)
+    val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2, useRope = useRope)
     val model = GPT(cfg, seed = 7)
     val idx = tok.encode("hello wo")
     val tgt = tok.encode("ello wor")
@@ -114,9 +114,12 @@ fun computeMaxGradError(): Double {
 }
 
 fun gradCheck() {
-    val maxRel = computeMaxGradError()
-    println("Gradient check: max relative error = %.2e".format(maxRel))
-    println(if (maxRel < 1e-4) "PASS — backprop is correct.\n" else "FAIL — check the op backwards.\n")
+    for ((label, useRope) in listOf("learned pos" to false, "RoPE" to true)) {
+        val maxRel = computeMaxGradError(useRope)
+        val verdict = if (maxRel < 1e-4) "PASS" else "FAIL"
+        println("Gradient check [%-11s]: max relative error = %.2e  $verdict".format(label, maxRel))
+    }
+    println()
 }
 
 /** Build a tokenizer of the requested kind over the corpus. */
@@ -166,13 +169,13 @@ fun trainModel(
     return model
 }
 
-fun train(kind: String) {
+fun train(kind: String, useRope: Boolean) {
     val text = corpus()
     val tok = makeTokenizer(kind, text)
     val blockSize = if (kind == "bpe") 16 else 24   // BPE tokens cover more text per step
-    val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 64, nHead = 4, nLayer = 2)
+    val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 64, nHead = 4, nLayer = 2, useRope = useRope)
 
-    println("tokenizer=$kind")
+    println("tokenizer=$kind  positions=${if (useRope) "rope" else "learned"}")
     val model = trainModel(tok, text, steps = 1500, cfg = cfg)
 
     val rng = Random(7)
@@ -183,26 +186,50 @@ fun train(kind: String) {
 }
 
 /** Train briefly, then render attention heatmaps for a sample string. */
-fun attnMode(kind: String) {
+fun attnMode(kind: String, useRope: Boolean) {
     val text = corpus()
     val tok = makeTokenizer(kind, text)
     val blockSize = if (kind == "bpe") 16 else 24
-    val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 48, nHead = 3, nLayer = 2)
+    val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 48, nHead = 3, nLayer = 2, useRope = useRope)
 
-    println("tokenizer=$kind — training a small model before visualizing...")
+    println("tokenizer=$kind  positions=${if (useRope) "rope" else "learned"} — training before visualizing...")
     val model = trainModel(tok, text, steps = 800, cfg = cfg)
 
     val probe = "the quick brown".take(blockSize)
     visualizeAttention(model, tok, probe, htmlPath = "attention.html")
 }
 
+/** Train learned-absolute vs. RoPE with identical settings and compare. */
+fun posCompare(kind: String) {
+    val text = corpus()
+    val tok = makeTokenizer(kind, text)
+    val blockSize = if (kind == "bpe") 16 else 24
+    val data = tok.encode(text)
+    val idx = data.copyOfRange(0, blockSize)
+    val tgt = data.copyOfRange(1, blockSize + 1)
+
+    println("Positional-encoding comparison (tokenizer=$kind, 1000 steps each)\n")
+    println("  %-18s  %-10s  %s".format("encoding", "eval loss", "params"))
+    for (useRope in listOf(false, true)) {
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 64, nHead = 4, nLayer = 2, useRope = useRope)
+        val model = trainModel(tok, text, steps = 1000, cfg = cfg, verbose = false)
+        val loss = model.loss(idx, tgt).data[0]
+        val name = if (useRope) "RoPE (rotary)" else "learned absolute"
+        println("  %-18s  %-10.4f  %d".format(name, loss, model.parameters().sumOf { it.data.size }))
+    }
+    println("\nRoPE uses fewer params (no ${blockSize}x64 position table) and generalizes")
+    println("to longer contexts because it encodes *relative* position.")
+}
+
 fun main(args: Array<String>) {
     val mode = args.getOrNull(0) ?: "all"
     val kind = args.getOrNull(1) ?: "char"
+    val useRope = args.getOrNull(2) == "rope"   // 3rd arg: "learned" (default) | "rope"
     when (mode) {
         "gradcheck" -> gradCheck()
-        "train" -> train(kind)
-        "attn" -> attnMode(kind)
-        else -> { gradCheck(); train("char") }
+        "train" -> train(kind, useRope)
+        "attn" -> attnMode(kind, useRope)
+        "poscompare" -> posCompare(kind)
+        else -> { gradCheck(); train("char", false) }
     }
 }

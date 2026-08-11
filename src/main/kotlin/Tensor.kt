@@ -295,6 +295,44 @@ class Tensor(
             }
         }
 
+        /**
+         * Rotary Positional Embedding (RoPE). Rotates each adjacent pair of
+         * dimensions of every row by an angle proportional to the row's position.
+         * `x` is (T x headDim), row i = token at position i. Applied to queries
+         * and keys inside attention, this makes the dot-product Q·K depend only on
+         * the *relative* offset between two tokens — no learned position table.
+         *
+         * For pair k at position i with angle θ = i · base^(-2k/d):
+         *   [x_a, x_b] -> [x_a·cosθ - x_b·sinθ,  x_a·sinθ + x_b·cosθ]   (a 2D rotation)
+         * The backward is the transposed (inverse) rotation.
+         */
+        fun rope(x: Tensor, base: Double = 10000.0): Tensor {
+            val t = x.rows; val d = x.cols
+            require(d % 2 == 0) { "RoPE needs an even head dim, got $d" }
+            val half = d / 2
+            val cos = DoubleArray(t * half); val sin = DoubleArray(t * half)
+            for (i in 0 until t) for (k in 0 until half) {
+                val ang = i * Math.pow(base, -2.0 * k / d)
+                cos[i * half + k] = Math.cos(ang)
+                sin[i * half + k] = Math.sin(ang)
+            }
+            val out = Tensor(t, d)
+            for (i in 0 until t) for (k in 0 until half) {
+                val a = x.data[i * d + 2 * k]; val b = x.data[i * d + 2 * k + 1]
+                val c = cos[i * half + k]; val s = sin[i * half + k]
+                out.data[i * d + 2 * k] = a * c - b * s
+                out.data[i * d + 2 * k + 1] = a * s + b * c
+            }
+            return out.build(listOf(x)) {
+                for (i in 0 until t) for (k in 0 until half) {
+                    val ga = out.grad[i * d + 2 * k]; val gb = out.grad[i * d + 2 * k + 1]
+                    val c = cos[i * half + k]; val s = sin[i * half + k]
+                    x.grad[i * d + 2 * k] += ga * c + gb * s
+                    x.grad[i * d + 2 * k + 1] += -ga * s + gb * c
+                }
+            }
+        }
+
         /** A parameter (leaf) tensor initialized with small random values. */
         fun param(rows: Int, cols: Int, rng: Random, std: Double = 0.02): Tensor {
             val t = Tensor(rows, cols)

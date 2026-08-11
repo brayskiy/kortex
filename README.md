@@ -16,14 +16,18 @@ tokens ─► token embedding ┐
 positions ─► pos embedding┘
 ```
 
+> Deeper dives: **[ARCHITECTURE.md](ARCHITECTURE.md)** (how it fits together,
+> data/shape flow, the autograd design) and **[CONTRIBUTING.md](CONTRIBUTING.md)**
+> (build/test, and how to add a differentiable op that passes the gradient check).
+
 ---
 
 ## The files (read them in this order)
 
 | File | What it teaches |
 |------|-----------------|
-| `src/main/kotlin/Tensor.kt` | **Autograd** — the learning machinery. A `Tensor` holds numbers and, after `backward()`, the gradient of the loss w.r.t. each number. Each op (matmul, softmax, layernorm, cross-entropy…) knows how to send gradients to its inputs. This is backpropagation. |
-| `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings, causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, and how they stack into a GPT. |
+| `src/main/kotlin/Tensor.kt` | **Autograd** — the learning machinery. A `Tensor` holds numbers and, after `backward()`, the gradient of the loss w.r.t. each number. Each op (matmul, softmax, layernorm, cross-entropy, RoPE…) knows how to send gradients to its inputs. This is backpropagation. |
+| `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings (learned **or** RoPE), causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, and how they stack into a GPT. |
 | `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
 | `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, and text generation (temperature sampling). |
 | `src/main/kotlin/Viz.kt` | **Attention visualizer** — renders each head's attention matrix as ASCII + an HTML heatmap, so you can *see* which tokens attend to which. |
@@ -42,15 +46,21 @@ just a JDK 17+; developed on JDK 21). The first run downloads Kotlin.
 #   -> Gradient check: max relative error = ~3e-06  ... PASS
 
 # 2) Train on the built-in corpus, then generate:
-./gradlew run --args="train char"     # character tokenizer (default)
-./gradlew run --args="train bpe"      # byte-level BPE tokenizer
+./gradlew run --args="train char"          # character tokenizer (default)
+./gradlew run --args="train bpe"           # byte-level BPE tokenizer
+./gradlew run --args="train char rope"     # rotary positions instead of a learned table
 
 # 3) Visualize attention (trains a small model, then draws heatmaps):
-./gradlew run --args="attn char"      # writes attention.html + prints ASCII grids
+./gradlew run --args="attn char"           # writes attention.html + prints ASCII grids
 
-# 4) Run the automated test suite:
+# 4) Compare positional encodings (learned absolute vs. RoPE):
+./gradlew run --args="poscompare char"
+
+# 5) Run the automated test suite:
 ./gradlew test
 ```
+
+Run modes take up to three args: `<mode> [char|bpe] [learned|rope]`.
 
 ### Tests (`src/test/kotlin/KortexTest.kt`)
 
@@ -63,6 +73,8 @@ just a JDK 17+; developed on JDK 21). The first run downloads Kotlin.
 | `bpeCompressesSequence` | BPE produces fewer tokens than characters |
 | `attentionIsCausalAndNormalized` | no attention to future tokens; each row sums to 1 |
 | `trainingReducesLoss` | a short training run lowers the loss |
+| `backpropMatchesNumericalGradients_rope` | the RoPE rotation backprops correctly |
+| `ropeDropsThePositionTable` | RoPE removes exactly the learned position table |
 
 Prefer plain Kotlin? It still compiles directly:
 `kotlinc src/main/kotlin/*.kt -include-runtime -d kortex.jar && java -jar kortex.jar train char`
@@ -116,9 +128,18 @@ Char = one id per character. **BPE** starts from raw bytes and repeatedly merges
 the most frequent adjacent pair into a new token, so `"the"`/`" is"` become
 single ids. Working on bytes means *any* text encodes (no "unknown token").
 
-**2. Embeddings** (`GPT.tokEmb`, `posEmb`) — each token id and each position gets
-a learned vector. `x = tokEmb[token] + posEmb[position]`. Position matters
-because attention itself is order-agnostic.
+**2. Embeddings + positions** (`GPT.tokEmb`, `posEmb`) — each token id gets a
+learned vector. Position matters (attention itself is order-agnostic), and Kortex
+offers two ways to add it:
+- **Learned absolute** (default): a lookup table of position vectors added to the
+  token vectors — `x = tokEmb[token] + posEmb[position]`.
+- **RoPE / rotary** (`useRope`, `Tensor.rope`): no table at all — inside attention
+  the query/key vectors are *rotated* by an angle proportional to their position,
+  so the score `Q·K` ends up depending only on the **relative** offset between two
+  tokens. Fewer parameters, and it extrapolates to longer contexts.
+
+Run `poscompare` to train both under identical settings — on the toy corpus RoPE
+matches or beats the learned table with fewer parameters.
 
 **3. Self-attention** (`Attention.forward`) — the only place tokens exchange
 information. For each token we build a **query** ("what am I looking for?"), a
