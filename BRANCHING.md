@@ -47,6 +47,16 @@ gh pr create --base main --head develop --title "Release"
 gh pr merge --merge        # allowed only from develop, only if tests pass
 ```
 
+## Reviews and housekeeping
+
+- **[CODEOWNERS](.github/CODEOWNERS)** auto-requests the owner as reviewer on
+  every PR. Review **approval is not required** to merge — on a single-maintainer
+  repo that would deadlock, since you can't approve your own PR. Merges are gated
+  on the `test` and `branch-policy` checks instead. To require approvals later,
+  add a second collaborator, then set `required_approving_review_count` to 1.
+- **Merged branches are auto-deleted** (repo setting `delete_branch_on_merge`),
+  so work branches don't pile up.
+
 ## Adjusting the rules
 
 The protection is applied with the GitHub API (see `scripts/setup-branch-protection.sh`).
