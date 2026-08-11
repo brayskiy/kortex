@@ -61,6 +61,11 @@ auto-generated notes. The bump is derived from the release PR's title:
 
 The first release is `v0.1.0`. Tags are created on `main`; no manual tagging needed.
 
+After publishing, the workflow regenerates **[CHANGELOG.md](CHANGELOG.md)** from
+the release notes and opens an auto-merging PR into `develop` (since `main` can't
+be pushed directly). The changelog reaches `main` on the next release. To
+regenerate locally: `./scripts/gen-changelog.sh`.
+
 ## Reviews and housekeeping
 
 - **[CODEOWNERS](.github/CODEOWNERS)** auto-requests the owner as reviewer on
