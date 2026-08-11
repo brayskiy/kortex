@@ -75,7 +75,18 @@ jobs:
           git fetch origin develop
           branch="chore/changelog-$NEXT-${{ github.run_id }}"
           git checkout -B "$branch" origin/develop
-          ./scripts/gen-changelog.sh "${{ github.repository }}"
+          # The releases API is eventually consistent, so poll until the just-
+          # published $NEXT actually appears before trusting the generated file.
+          for i in $(seq 1 10); do
+            ./scripts/gen-changelog.sh "${{ github.repository }}"
+            if grep -q "^## $NEXT " CHANGELOG.md; then break; fi
+            echo "Release $NEXT not visible yet (attempt $i); retrying..."
+            sleep 5
+          done
+          if ! grep -q "^## $NEXT " CHANGELOG.md; then
+            echo "::error::Release $NEXT never appeared in the API; aborting."
+            exit 1
+          fi
           if git diff --quiet -- CHANGELOG.md; then
             echo "CHANGELOG.md already current; nothing to do."
             exit 0
