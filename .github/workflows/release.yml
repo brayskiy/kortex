@@ -8,7 +8,8 @@ on:
     branches: [main]
 
 permissions:
-  contents: write   # needed to create tags and releases
+  contents: write        # create tags and releases
+  pull-requests: write   # open the changelog-update PR into develop
 
 concurrency:
   group: release-main
@@ -60,3 +61,29 @@ jobs:
             --title "$NEXT" \
             --generate-notes
           echo "Published release $NEXT"
+
+      - name: Regenerate CHANGELOG and open PR into develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          # main can't be pushed to directly, so the regenerated changelog goes
+          # through the normal flow: a PR into develop that auto-merges once the
+          # required checks pass (it reaches main on the next release).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin develop
+          branch="chore/changelog-$NEXT-${{ github.run_id }}"
+          git checkout -B "$branch" origin/develop
+          ./scripts/gen-changelog.sh "${{ github.repository }}"
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already current; nothing to do."
+            exit 0
+          fi
+          git add CHANGELOG.md
+          git commit -m "docs: update CHANGELOG for $NEXT"
+          git push origin "$branch"
+          gh pr create --base develop --head "$branch" \
+            --title "docs: update CHANGELOG for $NEXT" \
+            --body "Automated changelog regeneration from release notes for $NEXT."
+          gh pr merge "$branch" --auto --squash --delete-branch
