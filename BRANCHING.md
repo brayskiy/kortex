@@ -64,7 +64,15 @@ The first release is `v0.1.0`. Tags are created on `main`; no manual tagging nee
 After publishing, the workflow regenerates **[CHANGELOG.md](CHANGELOG.md)** from
 the release notes and opens an auto-merging PR into `develop` (since `main` can't
 be pushed directly). The changelog reaches `main` on the next release. To
-regenerate locally: `./scripts/gen-changelog.sh`.
+regenerate locally at any time: `./scripts/gen-changelog.sh`.
+
+**Requires a `RELEASE_PAT` secret.** GitHub does not run workflows for events
+made with the built-in `GITHUB_TOKEN`, so a bot-opened PR would never run the
+required `test`/`branch-policy` checks and could never merge. A fine-grained PAT
+(Contents + Pull requests: read/write on this repo) stored as the `RELEASE_PAT`
+secret lets the changelog PR run its checks and auto-merge. Without the secret,
+releases still succeed — the changelog step is skipped with a warning, and you
+run `./scripts/gen-changelog.sh` in your next release PR instead.
 
 ## Reviews and housekeeping
 

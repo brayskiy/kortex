@@ -62,16 +62,36 @@ jobs:
             --generate-notes
           echo "Published release $NEXT"
 
-      - name: Regenerate CHANGELOG and open PR into develop
+      # The changelog PR must run under a real identity, because GitHub does NOT
+      # trigger workflows (our required `test`/`branch-policy` checks) for events
+      # made with the built-in GITHUB_TOKEN. A user/fine-grained PAT in the
+      # RELEASE_PAT secret fixes that. Without it, we skip (the release still
+      # succeeds); refresh the changelog manually via scripts/gen-changelog.sh.
+      - name: Check for RELEASE_PAT
+        id: pat
         env:
-          GH_TOKEN: ${{ github.token }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          if [ -n "$RELEASE_PAT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_PAT not set — skipping automatic CHANGELOG update. Run scripts/gen-changelog.sh and include it in the next release PR."
+          fi
+
+      - name: Regenerate CHANGELOG and open PR into develop
+        if: steps.pat.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
           # main can't be pushed to directly, so the regenerated changelog goes
           # through the normal flow: a PR into develop that auto-merges once the
-          # required checks pass (it reaches main on the next release).
+          # required checks pass (it reaches main on the next release). Using the
+          # PAT for the push + PR makes those checks actually run.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git fetch origin develop
           branch="chore/changelog-$NEXT-${{ github.run_id }}"
           git checkout -B "$branch" origin/develop
