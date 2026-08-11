@@ -9,11 +9,37 @@
  *   - training reduces the loss
  */
 
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class KortexTest {
+
+    /** A saved model must reload to bit-identical predictions. */
+    @Test
+    fun checkpointRoundTrips() {
+        for (kind in listOf("char", "bpe")) {
+            val text = corpus()
+            val tok = makeTokenizer(kind, text)
+            val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 1, useRope = kind == "bpe")
+            val model = trainModel(tok, text, steps = 30, cfg = cfg, verbose = false)
+            val ids = tok.encode(text).copyOfRange(0, cfg.blockSize)
+            val before = model.forward(ids)
+
+            val file = File.createTempFile("kortex-$kind", ".bin").apply { deleteOnExit() }
+            Checkpoint.save(file.path, cfg, model, tok)
+            val (loaded, loadedTok) = Checkpoint.load(file.path)
+
+            // Tokenizer survives the round trip...
+            assertEquals(text, loadedTok.decode(loadedTok.encode(text)), "$kind tokenizer changed after load")
+            // ...and the reloaded weights produce identical logits.
+            val after = loaded.forward(ids)
+            for (i in before.data.indices) {
+                assertTrue(Math.abs(before.data[i] - after.data[i]) < 1e-12, "$kind logits differ after reload at $i")
+            }
+        }
+    }
 
     /** Backprop is correct if analytic gradients match numerical ones. */
     @Test

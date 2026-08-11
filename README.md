@@ -31,7 +31,8 @@ positions ─► pos embedding┘
 | `src/main/kotlin/Tensor.kt` | **Autograd** — the learning machinery. A `Tensor` holds numbers and, after `backward()`, the gradient of the loss w.r.t. each number. Each op (matmul, softmax, layernorm, cross-entropy, RoPE…) knows how to send gradients to its inputs. This is backpropagation. |
 | `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings (learned **or** RoPE), causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, and how they stack into a GPT. |
 | `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
-| `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, and text generation (temperature sampling). |
+| `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, temperature sampling, and the **CLI** (`train`/`generate`/`chat`). |
+| `src/main/kotlin/Checkpoint.kt` | **Save / load** — serialize a trained model (config + tokenizer + weights) to one file and reload it. |
 | `src/main/kotlin/Viz.kt` | **Attention visualizer** — renders each head's attention matrix as ASCII + an HTML heatmap, so you can *see* which tokens attend to which. |
 | `src/test/kotlin/KortexTest.kt` | **Tests** — `./gradlew test` checks backprop, tokenizer round-trips, attention causality, and that training lowers the loss. |
 
@@ -61,6 +62,44 @@ just a JDK 17+; developed on JDK 21). The first run downloads Kotlin.
 # 5) Run the automated test suite:
 ./gradlew test
 ```
+
+## Use the app (train → save → chat)
+
+Kortex has a small CLI: **train** a model to a file, then **generate** from it or
+**chat** with it interactively. For an interactive session, build the runnable
+binary once (it forwards stdin properly, unlike `gradlew run`):
+
+```bash
+./gradlew installDist                 # builds ./build/install/kortex/bin/kortex
+BIN=./build/install/kortex/bin/kortex
+
+# Train and save a checkpoint (weights + tokenizer + config -> one file):
+$BIN train --steps 1500 --out model.bin
+$BIN train --tok bpe --rope --out model.bin        # BPE + rotary positions
+$BIN train --data mytext.txt --embed 96 --layers 3 # your own corpus, bigger model
+
+# One-shot continuation from a saved model:
+$BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8
+
+# Interactive REPL — type a prompt, it continues it:
+$BIN chat --model model.bin
+#   > to be
+#   to be that is the question. all that glitters is not gold...
+#   Commands inside chat:  :temp 0.4   :tokens 80   :quit
+```
+
+`$BIN help` lists every command and flag. Prefer no build step? `./gradlew run
+--args="train --steps 800 --out model.bin"` works for one-shot commands (use the
+installed binary for `chat`, which needs live stdin).
+
+> This is a tiny character/BPE language model trained on a few sentences — think
+> *autocomplete that memorized its corpus*, not an assistant. It continues text;
+> it doesn't follow instructions. Turn `--temp` down for faithful recall, up for
+> more variety.
+
+---
+
+## Demo modes
 
 Run modes take up to three args: `<mode> [char|bpe] [learned|rope]`.
 
