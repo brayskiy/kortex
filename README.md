@@ -79,7 +79,8 @@ BIN=./build/install/kortex/bin/kortex
 $BIN train --steps 1500 --out model.bin
 $BIN train --tok bpe --rope --out model.bin        # BPE + rotary positions
 $BIN train --tie --dropout 0.1 --out model.bin     # weight tying + dropout
-$BIN train --data mytext.txt --embed 96 --layers 3 # your own corpus, bigger model
+$BIN train --sample --eval-every 300 --out model.bin   # larger corpus + val loss
+$BIN train --data mybook.txt --embed 96 --layers 3 # your own corpus, bigger model
 
 # One-shot continuation from a saved model:
 $BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8
@@ -99,6 +100,22 @@ matrix as the output projection (`logits = x · tokEmbᵀ`), removing the separa
 head — fewer parameters (`vocab × embed`) and often better quality. `--dropout F`
 randomly zeros activations during training (disabled at generation) to reduce
 overfitting.
+
+**Train / validation split.** Training holds out the last `--val F` (default 0.1)
+of the corpus and reports **held-out loss** every `--eval-every N` steps. When
+train loss keeps falling but val loss stops (or rises), that gap *is* overfitting.
+Use `--sample` for a larger built-in corpus (or `--data yourfile.txt`) so there's
+enough text to split:
+
+```bash
+$BIN train --sample --embed 96 --layers 3 --dropout 0.0 --eval-every 300
+#   step   300  train 2.3974  val 2.3488  (gap -0.0486)
+#   step   900  train 1.5915  val 2.7016  (gap +1.1102)   <- val rising = overfitting
+#   step  1200  train 1.1840  val 3.3073  (gap +2.1233)
+# Add --dropout 0.3 (and/or --tie) to shrink the gap:
+#   dropout 0.0 @ step 700:  train 1.28  val 3.04  (gap +1.76)
+#   dropout 0.3 @ step 700:  train 2.05  val 2.36  (gap +0.31)  <- generalizes better
+```
 
 **Sampling knobs** (all optional): `--temp` scales randomness (→0 greedy, >1 wild);
 `--top-k N` samples only from the N most likely tokens; `--top-p F` (nucleus) keeps

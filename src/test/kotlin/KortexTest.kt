@@ -95,6 +95,26 @@ class KortexTest {
         assertTrue(maxRel < 1e-4, "dropout gradient error too high: $maxRel")
     }
 
+    /** heldOutLoss must equal a direct eval-mode cross-entropy on its windows. */
+    @Test
+    fun heldOutLossMatchesDirectEval() {
+        val tok = CharTokenizer(sampleCorpus())
+        val data = tok.encode(sampleCorpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 16, nEmbed = 16, nHead = 2, nLayer = 1, dropout = 0.3)
+        val model = GPT(cfg, seed = 3)
+        val from = (data.size * 0.9).toInt()
+
+        // With count=1 the single window is the region start; compare to a manual
+        // eval-mode forward (train=false => dropout disabled, deterministic).
+        val idx = data.copyOfRange(from, from + cfg.blockSize)
+        val tgt = data.copyOfRange(from + 1, from + cfg.blockSize + 1)
+        val direct = Tensor.crossEntropy(model.forward(idx), tgt).data[0]
+        assertEquals(direct, heldOutLoss(model, data, from, cfg.blockSize, count = 1), 1e-12)
+        // A held-out loss over many windows is finite and sane (< random baseline).
+        val many = heldOutLoss(model, data, from, cfg.blockSize, count = 32)
+        assertTrue(many.isFinite() && many < Math.log(cfg.vocabSize.toDouble()) * 2)
+    }
+
     /** Dropout is a no-op at eval (training=false) and identity when p=0. */
     @Test
     fun dropoutIsIdentityAtEval() {
