@@ -95,6 +95,48 @@ class KortexTest {
         assertTrue(maxRel < 1e-4, "dropout gradient error too high: $maxRel")
     }
 
+    /** LR schedule ramps up during warmup then cosine-decays to minLr. */
+    @Test
+    fun scheduleWarmsUpThenCosineDecays() {
+        val steps = 100; val warmup = 10; val peak = 1e-3; val minLr = 1e-4
+        // Warmup: strictly increasing, ending at the peak.
+        var prev = -1.0
+        for (s in 0 until warmup) {
+            val lr = scheduledLr(s, steps, peak, warmup, cosine = true, minLr = minLr)
+            assertTrue(lr > prev, "warmup not increasing at $s"); prev = lr
+        }
+        assertEquals(peak, scheduledLr(warmup - 1, steps, peak, warmup, true, minLr), 1e-12)
+        // After warmup: cosine peak -> min, non-increasing, within bounds.
+        assertEquals(peak, scheduledLr(warmup, steps, peak, warmup, true, minLr), 1e-9)
+        assertEquals(minLr, scheduledLr(steps - 1, steps, peak, warmup, true, minLr), peak * 1e-3)
+        prev = Double.MAX_VALUE
+        for (s in warmup until steps) {
+            val lr = scheduledLr(s, steps, peak, warmup, true, minLr)
+            assertTrue(lr <= prev + 1e-12 && lr in (minLr - 1e-9)..(peak + 1e-9)); prev = lr
+        }
+        // cosine=false holds the peak (after warmup).
+        assertEquals(peak, scheduledLr(50, steps, peak, warmup, cosine = false, minLr = minLr), 1e-12)
+    }
+
+    /** Gradient clipping scales the global norm down to the cap, else leaves it. */
+    @Test
+    fun gradientClippingBoundsTheNorm() {
+        fun norm(ps: List<Tensor>): Double {
+            var s = 0.0; for (p in ps) for (g in p.grad) s += g * g; return Math.sqrt(s)
+        }
+        val a = Tensor(1, 3).also { it.grad[0] = 3.0; it.grad[1] = 4.0 }   // norm 5 with b
+        val b = Tensor(1, 1).also { it.grad[0] = 0.0 }
+        val ps = listOf(a, b)
+        assertEquals(5.0, norm(ps), 1e-9)
+        val returned = clipGradNorm(ps, maxNorm = 1.0)
+        assertEquals(5.0, returned, 1e-9)                 // returns the pre-clip norm
+        assertEquals(1.0, norm(ps), 1e-4)                 // scaled down to the cap
+        // Below the cap: untouched.
+        val c = Tensor(1, 2).also { it.grad[0] = 0.3; it.grad[1] = 0.4 }  // norm 0.5
+        clipGradNorm(listOf(c), maxNorm = 10.0)
+        assertEquals(0.5, norm(listOf(c)), 1e-9)
+    }
+
     /** heldOutLoss must equal a direct eval-mode cross-entropy on its windows. */
     @Test
     fun heldOutLossMatchesDirectEval() {
