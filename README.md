@@ -80,6 +80,7 @@ $BIN train --steps 1500 --out model.bin
 $BIN train --tok bpe --rope --out model.bin        # BPE + rotary positions
 $BIN train --tie --dropout 0.1 --out model.bin     # weight tying + dropout
 $BIN train --sample --eval-every 300 --out model.bin   # larger corpus + val loss
+$BIN train --warmup 100 --cosine --clip 1.0 --out model.bin  # LR schedule + grad clip
 $BIN train --data mybook.txt --embed 96 --layers 3 # your own corpus, bigger model
 
 # One-shot continuation from a saved model:
@@ -100,6 +101,19 @@ matrix as the output projection (`logits = x · tokEmbᵀ`), removing the separa
 head — fewer parameters (`vocab × embed`) and often better quality. `--dropout F`
 randomly zeros activations during training (disabled at generation) to reduce
 overfitting.
+
+**Learning-rate schedule & gradient clipping** (training stability). `--warmup N`
+ramps the LR linearly from 0 to peak over N steps (so a big early step can't wreck
+fresh weights); `--cosine` then anneals it down to `--min-lr` along a cosine curve.
+`--clip F` caps the global gradient norm at F (scaling all grads down together),
+which tames exploding gradients on bigger/deeper models. Training prints the live
+`lr` and `gnorm` each report, and you can preview the curve directly:
+
+```bash
+$BIN schedule --steps 1500 --warmup 150 --cosine
+#   ▁▂▃▅▆▇█▇▇▇▇▇▇▇▆▆▆▆▆▅▅▅▅▄▄▄▄▃▃▃▃▂▂▂▂▂▁▁▁▁▁▁▁▁
+#   ^peak reached at step 150, then cosine-decays to 3.00e-04
+```
 
 **Train / validation split.** Training holds out the last `--val F` (default 0.1)
 of the corpus and reports **held-out loss** every `--eval-every N` steps. When

@@ -58,7 +58,7 @@ fun sampleCorpus(): String = """
 """.trimIndent().replace("\n", " ").replace(Regex(" +"), " ")
 
 /** Adam optimizer with one moment-pair of state per parameter tensor. */
-class Adam(private val params: List<Tensor>, private val lr: Double = 3e-3) {
+class Adam(private val params: List<Tensor>, var lr: Double = 3e-3) {
     private val m = params.map { DoubleArray(it.data.size) }
     private val v = params.map { DoubleArray(it.data.size) }
     private var t = 0
@@ -80,6 +80,39 @@ class Adam(private val params: List<Tensor>, private val lr: Double = 3e-3) {
             }
         }
     }
+}
+
+/**
+ * Learning-rate schedule: linear **warmup** for `warmup` steps (0 → peak), then
+ * optional **cosine decay** from peak down to `minLr` over the remaining steps.
+ * Warmup avoids a big early step wrecking freshly-initialized weights; cosine
+ * decay anneals the rate so late training settles into a good minimum.
+ * `stepIdx` is 0-based.
+ */
+fun scheduledLr(stepIdx: Int, totalSteps: Int, peakLr: Double, warmup: Int, cosine: Boolean, minLr: Double): Double {
+    if (warmup > 0 && stepIdx < warmup) return peakLr * (stepIdx + 1).toDouble() / warmup
+    if (!cosine) return peakLr
+    val denom = maxOf(1, totalSteps - warmup)
+    val t = ((stepIdx - warmup).toDouble() / denom).coerceIn(0.0, 1.0)
+    return minLr + 0.5 * (peakLr - minLr) * (1.0 + Math.cos(Math.PI * t))
+}
+
+/**
+ * Clip the global gradient (L2) norm across all parameters to `maxNorm`, in
+ * place. If the combined norm exceeds the cap, every gradient is scaled down by
+ * the same factor — this preserves direction while bounding the step size, which
+ * tames the occasional exploding gradient on bigger/deeper models. Returns the
+ * pre-clip norm. `maxNorm <= 0` disables clipping.
+ */
+fun clipGradNorm(params: List<Tensor>, maxNorm: Double): Double {
+    var sq = 0.0
+    for (p in params) for (g in p.grad) sq += g * g
+    val norm = sqrt(sq)
+    if (maxNorm > 0.0 && norm > maxNorm) {
+        val scale = maxNorm / (norm + 1e-6)
+        for (p in params) for (i in p.grad.indices) p.grad[i] *= scale
+    }
+    return norm
 }
 
 /**
@@ -196,6 +229,7 @@ fun trainModel(
     steps: Int, batch: Int = 12, lr: Double = 3e-3,
     cfg: Config, seed: Long = 1234L, verbose: Boolean = true,
     valFraction: Double = 0.1, evalEvery: Int = 250, evalWindows: Int = 64,
+    warmup: Int = 0, cosine: Boolean = false, minLr: Double = 0.0, clip: Double = 0.0,
 ): GPT {
     val data = tok.encode(text)
     val model = GPT(cfg, seed)
@@ -219,6 +253,7 @@ fun trainModel(
     }
 
     var running = 0.0
+    var lastNorm = 0.0
     for (step in 1..steps) {
         var lossVal = 0.0
         opt.zeroGrad()
@@ -231,18 +266,20 @@ fun trainModel(
             lossVal += l.data[0]
         }
         model.parameters().forEach { p -> for (i in p.grad.indices) p.grad[i] /= batch }
+        lastNorm = clipGradNorm(model.parameters(), clip)          // bound the step size
+        opt.lr = scheduledLr(step - 1, steps, lr, warmup, cosine, minLr)
         opt.step()
 
         running += lossVal / batch
         if (verbose && evalEvery > 0 && step % evalEvery == 0) {
             val trainLoss = running / evalEvery
             running = 0.0
+            val head = "step %5d  lr %.2e  gnorm %5.2f  train %.4f".format(step, opt.lr, lastNorm, trainLoss)
             if (hasVal) {
                 val valLoss = heldOutLoss(model, data, trainEnd, cfg.blockSize, evalWindows)
-                val gap = valLoss - trainLoss
-                println("step %5d  train %.4f  val %.4f  (gap %+.4f)".format(step, trainLoss, valLoss, gap))
+                println("$head  val %.4f  (gap %+.4f)".format(valLoss, valLoss - trainLoss))
             } else {
-                println("step %5d  train %.4f".format(step, trainLoss))
+                println(head)
             }
         }
     }
@@ -356,11 +393,14 @@ fun cmdTrain(cli: Cli) {
     )
     val out = cli.str("out", "model.bin")
     println("training: tok=$kind rope=$useRope tie=${cfg.tieWeights} dropout=${cfg.dropout} embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} block=${cfg.blockSize} params=${GPT(cfg).parameters().sumOf { it.data.size }}")
+    val peakLr = cli.dbl("lr", 3e-3)
     val model = trainModel(
         tok, text,
         steps = cli.int("steps", 1500), batch = cli.int("batch", 12),
-        lr = cli.dbl("lr", 3e-3), cfg = cfg,
+        lr = peakLr, cfg = cfg,
         valFraction = cli.dbl("val", 0.1), evalEvery = cli.int("eval-every", 250),
+        warmup = cli.int("warmup", 0), cosine = cli.flag("cosine"),
+        minLr = cli.dbl("min-lr", peakLr * 0.1), clip = cli.dbl("clip", 0.0),
     )
     Checkpoint.save(out, cfg, model, tok)
     println("\nsaved model -> $out  (use: generate --model $out --prompt \"...\"  or  chat --model $out)")
@@ -465,6 +505,32 @@ fun cmdBench(cli: Cli) {
     println("outputs identical: $match")
 }
 
+/** schedule: draw the learning-rate curve (warmup + cosine) as a sparkline. */
+fun cmdSchedule(cli: Cli) {
+    val steps = cli.int("steps", 1500)
+    val warmup = cli.int("warmup", maxOf(1, steps / 10))
+    val cosine = !cli.flag("no-cosine")          // curve viz defaults to cosine on
+    val peak = cli.dbl("lr", 3e-3)
+    val minLr = cli.dbl("min-lr", peak * 0.1)
+
+    val cols = 64
+    val ramp = " ▁▂▃▄▅▆▇█"
+    val vals = DoubleArray(cols) { c ->
+        val s = if (cols == 1) 0 else c * (steps - 1) / (cols - 1)
+        scheduledLr(s, steps, peak, warmup, cosine, minLr)
+    }
+    val hi = vals.max(); val lo = vals.min()
+    val bars = buildString {
+        for (v in vals) {
+            val norm = if (hi > lo) (v - lo) / (hi - lo) else 0.0
+            append(ramp[(norm * (ramp.length - 1)).toInt().coerceIn(0, ramp.length - 1)])
+        }
+    }
+    println("LR schedule: steps=$steps warmup=$warmup cosine=$cosine peak=%.2e min=%.2e".format(peak, minLr))
+    println(bars)
+    println("^peak reached at step $warmup, then ${if (cosine) "cosine-decays to" else "holds at"} %.2e".format(vals.last()))
+}
+
 fun printHelp() {
     println(
         """
@@ -484,6 +550,9 @@ fun printHelp() {
             --dropout F       dropout probability, training only (default: 0)
             --embed N (64)    --heads N (4)   --layers N (2)   --block N
             --steps N (1500)  --batch N (12)  --lr F (0.003)
+            --warmup N        linear LR warmup steps (default: 0)
+            --cosine          cosine-decay the LR after warmup   --min-lr F
+            --clip F          clip global gradient norm to F (default: off)
             --out <file>      checkpoint path (default: model.bin)
 
           generate     Continue a prompt once, using a saved model.
@@ -497,6 +566,9 @@ fun printHelp() {
 
           bench        KV-cache vs. full-recompute decoding speed (random model).
             --block N (128)  --embed N (128)  --heads N (4)  --layers N (4)  --rope
+
+          schedule     Draw the LR warmup+cosine curve as a sparkline.
+            --steps N (1500)  --warmup N  --lr F  --min-lr F  --no-cosine
 
           gradcheck    Verify backprop (learned + RoPE).
           attn [char|bpe] [--rope]      Train small, visualize attention -> attention.html
@@ -513,6 +585,7 @@ fun main(args: Array<String>) {
         "generate" -> cmdGenerate(cli)
         "chat" -> cmdChat(cli)
         "bench" -> cmdBench(cli)
+        "schedule" -> cmdSchedule(cli)
         "gradcheck" -> gradCheck()
         "attn" -> attnMode(cli.pos(1, "char"), cli.flag("rope"))
         "poscompare" -> posCompare(cli.pos(1, "char"))
