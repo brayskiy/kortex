@@ -30,7 +30,7 @@ positions ─► pos embedding┘
 |------|-----------------|
 | `src/main/kotlin/Tensor.kt` | **Autograd** — the learning machinery. A `Tensor` holds numbers and, after `backward()`, the gradient of the loss w.r.t. each number. Each op (matmul, softmax, layernorm, cross-entropy, RoPE…) knows how to send gradients to its inputs. This is backpropagation. |
 | `src/main/kotlin/Model.kt` | **The transformer** — token/position embeddings (learned **or** RoPE), causal multi-head self-attention, the feed-forward MLP, residual connections, LayerNorm, optional **weight tying** and **dropout**, and how they stack into a GPT. |
-| `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (the algorithm GPT-2/3 use) behind one interface. |
+| `src/main/kotlin/Tokenizer.kt` | **Tokenization** — a char tokenizer and a byte-level **BPE** tokenizer (word-frequency training that scales to larger files) behind one interface. |
 | `src/main/kotlin/Train.kt` | **Working with the model** — the Adam optimizer, a numerical **gradient check**, the training loop, temperature sampling, and the **CLI** (`train`/`generate`/`chat`). |
 | `src/main/kotlin/Checkpoint.kt` | **Save / load** — serialize a trained model (config + tokenizer + weights) to one file and reload it. |
 | `src/main/kotlin/Sampling.kt` | **Sampling** — turn logits into a token with temperature, **top-k**, and **top-p** (nucleus). |
@@ -89,8 +89,12 @@ $BIN eval --model model.bin --data heldout.txt
 #   cross-entropy (nats/token): 1.4364
 #   perplexity               : 4.21
 
-# Compare a shared vs. separate output head, judged at each model's best-val point:
-$BIN tiecompare --steps 800
+# Compare a shared vs. separate output head, averaged over seeds (mean±sd):
+$BIN tiecompare --steps 800 --runs 5
+$BIN poscompare char --runs 5          # learned vs. RoPE positions
+
+# Export a char model to JSON to run it in a browser (see the web demo):
+$BIN export --model model.bin --out model.json
 
 # One-shot continuation from a saved model:
 $BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8

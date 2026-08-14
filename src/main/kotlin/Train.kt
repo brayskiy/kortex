@@ -260,7 +260,7 @@ fun trainModel(
     val data = tok.encode(text)
     val model = GPT(cfg, seed)
     val opt = Adam(model.parameters(), lr)
-    val rng = Random(42)
+    val rng = Random(seed + 999)   // batch order depends on seed, so runs differ
     require(data.size > cfg.blockSize + 1) { "corpus too short for blockSize=${cfg.blockSize}" }
 
     // Split off a held-out tail, but only if both halves can hold a window.
@@ -351,26 +351,51 @@ fun attnMode(kind: String, useRope: Boolean) {
     visualizeAttention(model, tok, probe, htmlPath = "attention.html")
 }
 
-/** Train learned-absolute vs. RoPE with identical settings and compare. */
-fun posCompare(kind: String) {
-    val text = corpus()
-    val tok = makeTokenizer(kind, text)
-    val blockSize = if (kind == "bpe") 16 else 24
-    val data = tok.encode(text)
-    val idx = data.copyOfRange(0, blockSize)
-    val tgt = data.copyOfRange(1, blockSize + 1)
+/** Mean and sample standard deviation of a list. */
+fun meanStd(xs: List<Double>): Pair<Double, Double> {
+    val m = xs.average()
+    val v = if (xs.size > 1) xs.sumOf { (it - m) * (it - m) } / (xs.size - 1) else 0.0
+    return m to sqrt(v)
+}
 
-    println("Positional-encoding comparison (tokenizer=$kind, 1000 steps each)\n")
-    println("  %-18s  %-10s  %s".format("encoding", "eval loss", "params"))
-    for (useRope in listOf(false, true)) {
-        val cfg = Config(vocabSize = tok.vocabSize, blockSize = blockSize, nEmbed = 64, nHead = 4, nLayer = 2, useRope = useRope)
-        val model = trainModel(tok, text, steps = 1000, cfg = cfg, verbose = false)
-        val loss = model.loss(idx, tgt).data[0]
-        val name = if (useRope) "RoPE (rotary)" else "learned absolute"
-        println("  %-18s  %-10.4f  %d".format(name, loss, model.parameters().sumOf { it.data.size }))
+/**
+ * Train `runs` models of `cfg` (each with a different seed) with early stopping,
+ * and return every run's best held-out loss. Averaging across seeds is what makes
+ * a comparison trustworthy — a single run is noisy.
+ */
+fun bestValRuns(tok: Tokenizer, text: String, cfg: Config, steps: Int, runs: Int, valFraction: Double = 0.1): List<Double> {
+    val data = tok.encode(text)
+    val split = (data.size * (1.0 - valFraction)).toInt()
+    val out = ArrayList<Double>(runs)
+    for (r in 0 until runs) {
+        val tmp = File.createTempFile("kortex-run", ".bin").apply { deleteOnExit() }
+        trainModel(tok, text, steps = steps, cfg = cfg, seed = 1000L + r, verbose = false,
+            valFraction = valFraction, evalEvery = maxOf(1, steps / 10), saveBest = tmp.path)
+        val (best, _) = Checkpoint.load(tmp.path)
+        out.add(heldOutLoss(best, data, split, cfg.blockSize, 128))
     }
-    println("\nRoPE uses fewer params (no ${blockSize}x64 position table) and generalizes")
-    println("to longer contexts because it encodes *relative* position.")
+    return out
+}
+
+/** Train learned-absolute vs. RoPE (averaged over --runs) and compare held-out loss. */
+fun posCompare(cli: Cli) {
+    val kind = cli.pos(1, "char")
+    val text = if (cli.strOrNull("data") != null) File(cli.strOrNull("data")!!).readText() else sampleCorpus()
+    val tok = makeTokenizer(kind, text)
+    val block = cli.int("block", if (kind == "bpe") 16 else 24)
+    val steps = cli.int("steps", 1000)
+    val runs = cli.int("runs", 3)
+
+    println("learned vs. RoPE  (tok=$kind, $steps steps, $runs runs, early-stopped)\n")
+    println("  %-18s  %-18s  %-10s  %s".format("positions", "best val (mean±sd)", "perplexity", "params"))
+    for (useRope in listOf(false, true)) {
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = block, nEmbed = cli.int("embed", 64),
+            nHead = cli.int("heads", 4), nLayer = cli.int("layers", 2), useRope = useRope)
+        val (m, sd) = meanStd(bestValRuns(tok, text, cfg, steps, runs))
+        val name = if (useRope) "RoPE (rotary)" else "learned absolute"
+        println("  %-18s  %.4f ± %.4f     %-10.2f  %d".format(name, m, sd, Math.exp(m), GPT(cfg).parameters().sumOf { it.data.size }))
+    }
+    println("\nRoPE uses fewer params (no position table) and encodes *relative* position.")
 }
 
 /* ----------------------------- CLI ----------------------------- */
@@ -471,6 +496,45 @@ fun cmdEval(cli: Cli) {
     println("perplexity               : %.2f".format(Math.exp(loss)))
 }
 
+/** Serialize a char-tokenizer model to compact JSON for the browser UI. */
+fun exportJson(model: GPT, tok: CharTokenizer): String {
+    val cfg = model.cfg
+    fun arr(t: Tensor) = t.data.joinToString(",", "[", "]") { it.toString() }
+    fun jstr(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\""
+    val sb = StringBuilder("{")
+    sb.append("\"vocab\":").append(jstr(tok.chars.joinToString(""))).append(",")
+    sb.append("\"blockSize\":${cfg.blockSize},\"nEmbed\":${cfg.nEmbed},\"nHead\":${cfg.nHead},")
+    sb.append("\"nLayer\":${cfg.nLayer},\"useRope\":${cfg.useRope},\"tieWeights\":${cfg.tieWeights},")
+    sb.append("\"tokEmb\":").append(arr(model.tokEmb)).append(",")
+    sb.append("\"posEmb\":").append(model.posEmb?.let { arr(it) } ?: "null").append(",")
+    sb.append("\"lnFg\":").append(arr(model.lnFg)).append(",\"lnFb\":").append(arr(model.lnFb)).append(",")
+    sb.append("\"head\":").append(model.head?.let { arr(it) } ?: "null").append(",")
+    sb.append("\"blocks\":[")
+    model.blocks.forEachIndexed { i, b ->
+        if (i > 0) sb.append(",")
+        sb.append("{\"ln1g\":").append(arr(b.ln1g)).append(",\"ln1b\":").append(arr(b.ln1b))
+        sb.append(",\"ln2g\":").append(arr(b.ln2g)).append(",\"ln2b\":").append(arr(b.ln2b))
+        sb.append(",\"wq\":").append(arr(b.attn.wq)).append(",\"wk\":").append(arr(b.attn.wk))
+        sb.append(",\"wv\":").append(arr(b.attn.wv)).append(",\"wo\":").append(arr(b.attn.wo))
+        sb.append(",\"w1\":").append(arr(b.mlp.w1)).append(",\"b1\":").append(arr(b.mlp.b1))
+        sb.append(",\"w2\":").append(arr(b.mlp.w2)).append(",\"b2\":").append(arr(b.mlp.b2)).append("}")
+    }
+    sb.append("]}")
+    return sb.toString()
+}
+
+/** export: write a saved char model to JSON so the browser UI can run it. */
+fun cmdExport(cli: Cli) {
+    val path = cli.str("model", "model.bin")
+    if (!File(path).exists()) { System.err.println("No model at '$path'."); return }
+    val (model, tok) = Checkpoint.load(path)
+    if (tok !is CharTokenizer) { System.err.println("export supports the char tokenizer only (train without --tok bpe)."); return }
+    val out = cli.str("out", "model.json")
+    File(out).writeText(exportJson(model, tok))
+    println("exported ${File(out).length()} bytes -> $out  (embed in the web chat UI)")
+}
+
 /** tiecompare: train tied vs. untied under identical settings; compare held-out quality. */
 fun tieCompare(cli: Cli) {
     val text = when {
@@ -486,28 +550,25 @@ fun tieCompare(cli: Cli) {
     val split = (data.size * (1.0 - valFraction)).toInt()
     require(data.size - split > block + 1) { "corpus too small for a val split; use --data" }
 
-    // Compare each model at its BEST held-out point (early stopping), so we judge
-    // generalization rather than however overfit both happen to be at step N.
-    println("learned vs. tied  (tok=$kind, $steps steps, early-stopped, held-out ${data.size - split} tokens)\n")
-    println("  %-18s  %-10s  %-10s  %s".format("output head", "best val", "perplexity", "params"))
+    // Compare each model at its BEST held-out point (early stopping), averaged
+    // over --runs seeds so the verdict isn't a single-run fluke.
+    val runs = cli.int("runs", 3)
+    println("learned vs. tied  (tok=$kind, $steps steps, $runs runs, held-out ${data.size - split} tokens)\n")
+    println("  %-18s  %-18s  %-10s  %s".format("output head", "best val (mean±sd)", "perplexity", "params"))
     val results = LinkedHashMap<String, Double>()
     for (tie in listOf(false, true)) {
         val cfg = Config(vocabSize = tok.vocabSize, blockSize = block, nEmbed = cli.int("embed", 64),
             nHead = cli.int("heads", 4), nLayer = cli.int("layers", 2), tieWeights = tie)
-        val tmp = File.createTempFile("kortex-tiecmp", ".bin").apply { deleteOnExit() }
-        trainModel(tok, text, steps = steps, cfg = cfg, verbose = false,
-            valFraction = valFraction, evalEvery = maxOf(1, steps / 10), saveBest = tmp.path)
-        val (best, _) = Checkpoint.load(tmp.path)
-        val valLoss = heldOutLoss(best, data, split, block, 128)
+        val (m, sd) = meanStd(bestValRuns(tok, text, cfg, steps, runs, valFraction))
         val name = if (tie) "tied (shared)" else "learned (separate)"
-        results[name] = valLoss
-        println("  %-18s  %-10.4f  %-10.2f  %d".format(name, valLoss, Math.exp(valLoss), best.parameters().sumOf { it.data.size }))
+        results[name] = m
+        println("  %-18s  %.4f ± %.4f     %-10.2f  %d".format(name, m, sd, Math.exp(m), GPT(cfg).parameters().sumOf { it.data.size }))
     }
     val winner = results.minByOrNull { it.value }!!
     val other = results.maxByOrNull { it.value }!!
-    println("\n-> ${winner.key} generalizes better here (val %.4f vs %.4f).".format(winner.value, other.value))
+    println("\n-> ${winner.key} generalizes better here (mean val %.4f vs %.4f).".format(winner.value, other.value))
     println("   Tying always uses vocab×embed fewer params; whether it also wins on")
-    println("   quality varies with corpus size and run — try --data and more --steps.")
+    println("   quality varies with corpus and run — try --data, more --steps, more --runs.")
 }
 
 /** Build a Sampler from --temp / --top-k / --top-p flags. */
@@ -659,7 +720,10 @@ fun printHelp() {
             --model <file> (model.bin)  --data <file> (required)  --stride N
 
           tiecompare   Train tied vs. untied and compare held-out perplexity.
-            --data <file> | (built-in sample)  --steps N  --embed/--heads/--layers
+            --data <file> | (built-in sample)  --steps N  --runs N (3)  --embed/...
+
+          export       Write a saved char model to JSON for the browser chat UI.
+            --model <file> (model.bin)  --out <file> (model.json)
 
           generate     Continue a prompt once, using a saved model.
             --model <file> (model.bin)  --prompt "text"  --tokens N (200)
@@ -692,11 +756,12 @@ fun main(args: Array<String>) {
         "chat" -> cmdChat(cli)
         "eval" -> cmdEval(cli)
         "tiecompare" -> tieCompare(cli)
+        "export" -> cmdExport(cli)
         "bench" -> cmdBench(cli)
         "schedule" -> cmdSchedule(cli)
         "gradcheck" -> gradCheck()
         "attn" -> attnMode(cli.pos(1, "char"), cli.flag("rope"))
-        "poscompare" -> posCompare(cli.pos(1, "char"))
+        "poscompare" -> posCompare(cli)
         "help", "--help", "-h" -> printHelp()
         else -> { gradCheck(); train("char", false) }   // no-arg default demo
     }

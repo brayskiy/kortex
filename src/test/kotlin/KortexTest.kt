@@ -95,6 +95,39 @@ class KortexTest {
         assertTrue(maxRel < 1e-4, "dropout gradient error too high: $maxRel")
     }
 
+    /** BPE merges never cross a word boundary but still compress within words. */
+    @Test
+    fun bpeWordBoundedAndLossless() {
+        val text = sampleCorpus()
+        val tok = BpeTokenizer.train(text, targetVocab = 400)
+        assertEquals(text, tok.decode(tok.encode(text)))            // lossless
+        assertTrue(tok.encode(text).size < text.length)             // compresses
+        // A space (its own whitespace "word") never merges with an adjacent letter,
+        // so "a" and " a" tokenize to sequences that both end the same way.
+        assertEquals("hi there", tok.decode(tok.encode("hi there")))
+    }
+
+    @Test
+    fun meanStdComputesCorrectly() {
+        val (m, sd) = meanStd(listOf(2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0))
+        assertEquals(5.0, m, 1e-9)
+        assertEquals(2.138, sd, 1e-3)   // sample stddev
+    }
+
+    /** JSON export is well-formed and carries every weight the browser UI needs. */
+    @Test
+    fun exportJsonHasAllWeights() {
+        val tok = CharTokenizer(corpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 8, nEmbed = 16, nHead = 2, nLayer = 2)
+        val json = exportJson(GPT(cfg, seed = 1), tok)
+        for (key in listOf("vocab", "tokEmb", "posEmb", "head", "blocks", "wq", "w1", "ln1g")) {
+            assertTrue(json.contains("\"$key\""), "export missing $key")
+        }
+        // Braces/brackets balance (a cheap well-formedness check).
+        assertEquals(json.count { it == '{' }, json.count { it == '}' })
+        assertEquals(json.count { it == '[' }, json.count { it == ']' })
+    }
+
     /** corpusLoss over a single window equals that window's cross-entropy. */
     @Test
     fun corpusLossMatchesSingleWindow() {

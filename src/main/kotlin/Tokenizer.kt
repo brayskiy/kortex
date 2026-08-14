@@ -43,8 +43,14 @@ class CharTokenizer(text: String) : Tokenizer {
 
 /**
  * Byte-level BPE. Ids 0..255 are the raw bytes; ids >= 256 are learned merges.
- * `vocab[id]` is the byte sequence a token expands to (for decoding), and
- * `newId[pair]` / `rank[pair]` drive greedy encoding.
+ * `vocab[id]` is the byte sequence a token expands to (for decoding).
+ *
+ * Scales to larger files by pre-tokenizing into "words" (runs of whitespace or
+ * non-whitespace via [WORD]) and training on the *frequency table of distinct
+ * words* rather than the raw byte stream — the same trick GPT-2 uses. Merges
+ * never cross a word boundary, and each distinct word is encoded once and cached,
+ * so a big repetitive corpus costs work proportional to its vocabulary, not its
+ * length.
  */
 class BpeTokenizer private constructor(
     override val vocabSize: Int,
@@ -53,12 +59,23 @@ class BpeTokenizer private constructor(
     private val rank: HashMap<Long, Int>,    // packed (a,b) -> merge priority (lower = earlier)
 ) : Tokenizer {
 
+    private val cache = HashMap<String, IntArray>()   // word -> its token ids
+
     override fun encode(s: String): IntArray {
-        val bytes = s.toByteArray(Charsets.UTF_8)
-        if (bytes.isEmpty()) return IntArray(0)
-        val ids = ArrayList<Int>(bytes.size)
-        for (b in bytes) ids.add(b.toInt() and 0xff)
-        // Greedily apply the lowest-rank merge available, all occurrences, repeat.
+        if (s.isEmpty()) return IntArray(0)
+        val out = ArrayList<Int>(s.length)
+        for (m in WORD.findAll(s)) {                  // tiles s exactly (lossless)
+            val word = m.value
+            val ids = cache.getOrPut(word) { encodeWord(word) }
+            for (id in ids) out.add(id)
+        }
+        return out.toIntArray()
+    }
+
+    /** Apply merges within a single word: repeatedly merge the lowest-rank pair. */
+    private fun encodeWord(word: String): IntArray {
+        val ids = ArrayList<Int>()
+        for (b in word.toByteArray(Charsets.UTF_8)) ids.add(b.toInt() and 0xff)
         while (ids.size >= 2) {
             var bestRank = Int.MAX_VALUE
             var bestPair = 0L
@@ -67,17 +84,16 @@ class BpeTokenizer private constructor(
                 val r = rank[p] ?: continue
                 if (r < bestRank) { bestRank = r; bestPair = p }
             }
-            if (bestRank == Int.MAX_VALUE) break   // no more learned merges apply
+            if (bestRank == Int.MAX_VALUE) break
             val merged = newId.getValue(bestPair)
-            val a = (bestPair ushr 32).toInt()
-            val b = (bestPair and 0xffffffffL).toInt()
-            val out = ArrayList<Int>(ids.size)
+            val a = (bestPair ushr 32).toInt(); val b = (bestPair and 0xffffffffL).toInt()
             var i = 0
+            val next = ArrayList<Int>(ids.size)
             while (i < ids.size) {
-                if (i < ids.size - 1 && ids[i] == a && ids[i + 1] == b) { out.add(merged); i += 2 }
-                else { out.add(ids[i]); i += 1 }
+                if (i < ids.size - 1 && ids[i] == a && ids[i + 1] == b) { next.add(merged); i += 2 }
+                else { next.add(ids[i]); i += 1 }
             }
-            ids.clear(); ids.addAll(out)
+            ids.clear(); ids.addAll(next)
         }
         return ids.toIntArray()
     }
@@ -104,6 +120,9 @@ class BpeTokenizer private constructor(
     }
 
     companion object {
+        /** Whitespace-run or non-whitespace-run; the alternation tiles any string. */
+        private val WORD = Regex("\\s+|\\S+")
+
         /** Pack two ids into one Long key so we can use a HashMap for pairs. */
         private fun pack(a: Int, b: Int): Long = (a.toLong() shl 32) or (b.toLong() and 0xffffffffL)
 
@@ -125,9 +144,9 @@ class BpeTokenizer private constructor(
         }
 
         /**
-         * Learn merges from `text` until the vocabulary reaches `targetVocab`
-         * (or no repeated pair remains). Educational: operates on the whole
-         * corpus with no word-boundary pre-tokenization.
+         * Learn merges until the vocabulary reaches `targetVocab` (or no repeated
+         * pair remains). Trains on the distinct-word frequency table, so cost
+         * scales with the number of unique words, not the corpus length.
          */
         fun train(text: String, targetVocab: Int): BpeTokenizer {
             require(targetVocab >= 256) { "byte-level BPE needs vocab >= 256" }
@@ -136,36 +155,50 @@ class BpeTokenizer private constructor(
             val newId = HashMap<Long, Int>()
             val rank = HashMap<Long, Int>()
 
-            var ids = ArrayList<Int>()
-            for (b in text.toByteArray(Charsets.UTF_8)) ids.add(b.toInt() and 0xff)
+            // Distinct words -> frequency, each represented as a list of byte ids.
+            val freq = HashMap<String, Int>()
+            for (m in WORD.findAll(text)) freq[m.value] = (freq[m.value] ?: 0) + 1
+            val words = ArrayList<ArrayList<Int>>(freq.size)
+            val counts = IntArray(freq.size)
+            var wi = 0
+            for ((w, c) in freq) {
+                val ids = ArrayList<Int>()
+                for (b in w.toByteArray(Charsets.UTF_8)) ids.add(b.toInt() and 0xff)
+                words.add(ids); counts[wi] = c; wi++
+            }
 
             while (vocab.size < targetVocab) {
-                // Count every adjacent pair in the current sequence.
-                val counts = HashMap<Long, Int>()
-                for (i in 0 until ids.size - 1) {
-                    val p = pack(ids[i], ids[i + 1])
-                    counts[p] = (counts[p] ?: 0) + 1
+                // Count adjacent pairs across all words, weighted by word frequency.
+                val pairCount = HashMap<Long, Int>()
+                for (w in words.indices) {
+                    val ids = words[w]; val c = counts[w]
+                    for (i in 0 until ids.size - 1) {
+                        val p = pack(ids[i], ids[i + 1])
+                        pairCount[p] = (pairCount[p] ?: 0) + c
+                    }
                 }
-                // Most frequent pair; stop if nothing repeats.
                 var best = 0L; var bestC = 1
-                for ((p, c) in counts) if (c > bestC) { bestC = c; best = p }
+                for ((p, c) in pairCount) if (c > bestC) { bestC = c; best = p }
                 if (bestC <= 1) break
 
-                val a = (best ushr 32).toInt()
-                val b = (best and 0xffffffffL).toInt()
+                val a = (best ushr 32).toInt(); val b = (best and 0xffffffffL).toInt()
                 val id = vocab.size
                 vocab.add(vocab[a] + vocab[b])
                 newId[best] = id
                 rank[best] = rank.size
 
-                // Replace every occurrence of the pair with the new id.
-                val out = ArrayList<Int>(ids.size)
-                var i = 0
-                while (i < ids.size) {
-                    if (i < ids.size - 1 && ids[i] == a && ids[i + 1] == b) { out.add(id); i += 2 }
-                    else { out.add(ids[i]); i += 1 }
+                // Apply the merge inside every word.
+                for (w in words.indices) {
+                    val ids = words[w]
+                    if (ids.size < 2) continue
+                    var i = 0
+                    val out = ArrayList<Int>(ids.size)
+                    while (i < ids.size) {
+                        if (i < ids.size - 1 && ids[i] == a && ids[i + 1] == b) { out.add(id); i += 2 }
+                        else { out.add(ids[i]); i += 1 }
+                    }
+                    words[w] = out
                 }
-                ids = out
             }
             return BpeTokenizer(vocab.size, vocab.toTypedArray(), newId, rank)
         }
