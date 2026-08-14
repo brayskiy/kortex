@@ -95,6 +95,51 @@ class KortexTest {
         assertTrue(maxRel < 1e-4, "dropout gradient error too high: $maxRel")
     }
 
+    /** corpusLoss over a single window equals that window's cross-entropy. */
+    @Test
+    fun corpusLossMatchesSingleWindow() {
+        val tok = CharTokenizer(sampleCorpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 16, nEmbed = 16, nHead = 2, nLayer = 1)
+        val model = GPT(cfg, seed = 4)
+        val data = tok.encode(sampleCorpus()).copyOfRange(0, cfg.blockSize + 1)   // exactly one window
+        val direct = Tensor.crossEntropy(model.forward(data.copyOfRange(0, cfg.blockSize)), data.copyOfRange(1, cfg.blockSize + 1)).data[0]
+        val loss = corpusLoss(model, data, cfg.blockSize, stride = cfg.blockSize)
+        assertEquals(direct, loss, 1e-12)
+        assertEquals(Math.exp(direct), Math.exp(loss), 1e-9)   // perplexity = exp(loss)
+    }
+
+    /** A trained model must beat the uniform baseline (perplexity < vocab size). */
+    @Test
+    fun trainedPerplexityBeatsUniform() {
+        val tok = CharTokenizer(sampleCorpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 16, nEmbed = 32, nHead = 2, nLayer = 1)
+        val model = trainModel(tok, sampleCorpus(), steps = 200, cfg = cfg, verbose = false, evalEvery = 0)
+        val data = tok.encode(sampleCorpus())
+        val ppl = Math.exp(corpusLoss(model, data, cfg.blockSize, stride = cfg.blockSize))
+        assertTrue(ppl < tok.vocabSize, "perplexity $ppl should beat uniform ${tok.vocabSize}")
+    }
+
+    /** Early stopping saves the best-val model; reloaded, it's no worse than final. */
+    @Test
+    fun earlyStoppingSavesBestValModel() {
+        val tok = CharTokenizer(sampleCorpus())
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = 16, nEmbed = 48, nHead = 3, nLayer = 2)
+        val data = tok.encode(sampleCorpus())
+        val split = (data.size * 0.9).toInt()
+        val file = File.createTempFile("kortex-best", ".bin").apply { deleteOnExit() }
+        // High LR + no regularization on a small train set => it will overfit, so
+        // best-val is earlier than the final step.
+        val finalModel = trainModel(
+            tok, sampleCorpus(), steps = 600, lr = 5e-3, cfg = cfg, verbose = false,
+            evalEvery = 100, saveBest = file.path,
+        )
+        assertTrue(file.exists(), "best checkpoint was not written")
+        val (best, _) = Checkpoint.load(file.path)
+        val bestVal = heldOutLoss(best, data, split, cfg.blockSize, 128)
+        val finalVal = heldOutLoss(finalModel, data, split, cfg.blockSize, 128)
+        assertTrue(bestVal <= finalVal + 1e-9, "saved best val $bestVal should be <= final $finalVal")
+    }
+
     /** LR schedule ramps up during warmup then cosine-decays to minLr. */
     @Test
     fun scheduleWarmsUpThenCosineDecays() {

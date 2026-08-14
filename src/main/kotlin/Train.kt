@@ -217,12 +217,37 @@ fun heldOutLoss(model: GPT, data: IntArray, from: Int, block: Int, count: Int): 
 }
 
 /**
+ * Mean per-token cross-entropy over a whole token sequence, in eval mode. Sweeps
+ * windows at the given `stride` (default = block, i.e. non-overlapping chunks).
+ * `perplexity = exp(meanLoss)` — the standard language-model quality metric: the
+ * effective number of equally-likely choices the model is deciding between.
+ */
+fun corpusLoss(model: GPT, data: IntArray, block: Int, stride: Int): Double {
+    require(data.size > block) { "text shorter than the model's context ($block)" }
+    val step = maxOf(1, stride)
+    var sum = 0.0; var count = 0
+    var start = 0
+    while (start + block + 1 <= data.size) {
+        val idx = data.copyOfRange(start, start + block)
+        val tgt = data.copyOfRange(start + 1, start + block + 1)
+        sum += Tensor.crossEntropy(model.forward(idx), tgt).data[0]
+        count++
+        start += step
+    }
+    return if (count == 0) Double.NaN else sum / count
+}
+
+/**
  * Train a model on `text` with `tok`; returns the trained model.
  *
  * The last `valFraction` of the corpus is held out for validation. Training only
  * samples windows from the train region; every `evalEvery` steps we report the
  * held-out loss. Watching val loss stop improving (or rise) while train loss
  * keeps falling is exactly what overfitting looks like.
+ *
+ * If `saveBest` is set (and there's a validation split), the model is checkpointed
+ * to that path every time held-out loss reaches a new low — i.e. early stopping:
+ * the file ends up holding the best-generalizing weights, not the last ones.
  */
 fun trainModel(
     tok: Tokenizer, text: String,
@@ -230,6 +255,7 @@ fun trainModel(
     cfg: Config, seed: Long = 1234L, verbose: Boolean = true,
     valFraction: Double = 0.1, evalEvery: Int = 250, evalWindows: Int = 64,
     warmup: Int = 0, cosine: Boolean = false, minLr: Double = 0.0, clip: Double = 0.0,
+    saveBest: String? = null,
 ): GPT {
     val data = tok.encode(text)
     val model = GPT(cfg, seed)
@@ -254,6 +280,8 @@ fun trainModel(
 
     var running = 0.0
     var lastNorm = 0.0
+    var bestVal = Double.POSITIVE_INFINITY
+    var bestStep = -1
     for (step in 1..steps) {
         var lossVal = 0.0
         opt.zeroGrad()
@@ -271,18 +299,25 @@ fun trainModel(
         opt.step()
 
         running += lossVal / batch
-        if (verbose && evalEvery > 0 && step % evalEvery == 0) {
+        if (evalEvery > 0 && step % evalEvery == 0) {
             val trainLoss = running / evalEvery
             running = 0.0
-            val head = "step %5d  lr %.2e  gnorm %5.2f  train %.4f".format(step, opt.lr, lastNorm, trainLoss)
-            if (hasVal) {
-                val valLoss = heldOutLoss(model, data, trainEnd, cfg.blockSize, evalWindows)
-                println("$head  val %.4f  (gap %+.4f)".format(valLoss, valLoss - trainLoss))
-            } else {
-                println(head)
+            val valLoss = if (hasVal) heldOutLoss(model, data, trainEnd, cfg.blockSize, evalWindows) else Double.NaN
+
+            // Early stopping: keep the checkpoint at its lowest held-out loss.
+            var improved = false
+            if (hasVal && saveBest != null && valLoss < bestVal) {
+                bestVal = valLoss; bestStep = step; improved = true
+                Checkpoint.save(saveBest, cfg, model, tok)
+            }
+            if (verbose) {
+                val head = "step %5d  lr %.2e  gnorm %5.2f  train %.4f".format(step, opt.lr, lastNorm, trainLoss)
+                if (hasVal) println("$head  val %.4f  (gap %+.4f)%s".format(valLoss, valLoss - trainLoss, if (improved) "  * saved" else ""))
+                else println(head)
             }
         }
     }
+    if (verbose && bestStep > 0) println("best val %.4f at step %d -> %s".format(bestVal, bestStep, saveBest))
     return model
 }
 
@@ -394,6 +429,7 @@ fun cmdTrain(cli: Cli) {
     val out = cli.str("out", "model.bin")
     println("training: tok=$kind rope=$useRope tie=${cfg.tieWeights} dropout=${cfg.dropout} embed=${cfg.nEmbed} heads=${cfg.nHead} layers=${cfg.nLayer} block=${cfg.blockSize} params=${GPT(cfg).parameters().sumOf { it.data.size }}")
     val peakLr = cli.dbl("lr", 3e-3)
+    val earlyStop = cli.flag("early-stop")
     val model = trainModel(
         tok, text,
         steps = cli.int("steps", 1500), batch = cli.int("batch", 12),
@@ -401,14 +437,77 @@ fun cmdTrain(cli: Cli) {
         valFraction = cli.dbl("val", 0.1), evalEvery = cli.int("eval-every", 250),
         warmup = cli.int("warmup", 0), cosine = cli.flag("cosine"),
         minLr = cli.dbl("min-lr", peakLr * 0.1), clip = cli.dbl("clip", 0.0),
+        saveBest = if (earlyStop) out else null,
     )
-    Checkpoint.save(out, cfg, model, tok)
+    // With early stopping the best-val checkpoint is already on disk; otherwise
+    // save the final model. (If there was no val split, ensure a file exists.)
+    if (!earlyStop) Checkpoint.save(out, cfg, model, tok)
+    else if (!File(out).exists()) { Checkpoint.save(out, cfg, model, tok); println("(no val split — saved final model)") }
     println("\nsaved model -> $out  (use: generate --model $out --prompt \"...\"  or  chat --model $out)")
     runCatching {
+        // Sample from the model on disk (the best one when early-stopping).
+        val (best, bestTok) = Checkpoint.load(out)
         val seed = if (dataPath == null && !cli.flag("sample")) "to be" else "the "
         println("--- sample ---")
-        println(generate(model, tok, seed, maxNew = 80, sampler = Sampler(0.8), rng = Random(7)))
+        println(generate(best, bestTok, seed, maxNew = 80, sampler = Sampler(0.8), rng = Random(7)))
     }.onFailure { println("(sample skipped: ${it.message})") }
+}
+
+/** eval: report loss and perplexity of a saved model on a text file. */
+fun cmdEval(cli: Cli) {
+    val path = cli.str("model", "model.bin")
+    if (!File(path).exists()) { System.err.println("No model at '$path'. Train one first."); return }
+    val dataPath = cli.strOrNull("data")
+    if (dataPath == null) { System.err.println("eval needs --data <file> to score."); return }
+    val (model, tok) = Checkpoint.load(path)
+    val text = File(dataPath).readText()
+    val data = tok.encode(text)
+    val block = model.cfg.blockSize
+    if (data.size <= block) { System.err.println("text has ${data.size} tokens, need > $block (the context)."); return }
+    val stride = cli.int("stride", block)
+    val loss = corpusLoss(model, data, block, stride)
+    println("eval: tokens=${data.size} block=$block stride=$stride")
+    println("cross-entropy (nats/token): %.4f".format(loss))
+    println("perplexity               : %.2f".format(Math.exp(loss)))
+}
+
+/** tiecompare: train tied vs. untied under identical settings; compare held-out quality. */
+fun tieCompare(cli: Cli) {
+    val text = when {
+        cli.strOrNull("data") != null -> File(cli.strOrNull("data")!!).readText()
+        else -> sampleCorpus()   // large enough to hold out a validation set
+    }
+    val kind = cli.str("tok", "char")
+    val tok = makeTokenizer(kind, text)
+    val data = tok.encode(text)
+    val block = cli.int("block", if (kind == "bpe") 16 else 24)
+    val steps = cli.int("steps", 1000)
+    val valFraction = 0.1
+    val split = (data.size * (1.0 - valFraction)).toInt()
+    require(data.size - split > block + 1) { "corpus too small for a val split; use --data" }
+
+    // Compare each model at its BEST held-out point (early stopping), so we judge
+    // generalization rather than however overfit both happen to be at step N.
+    println("learned vs. tied  (tok=$kind, $steps steps, early-stopped, held-out ${data.size - split} tokens)\n")
+    println("  %-18s  %-10s  %-10s  %s".format("output head", "best val", "perplexity", "params"))
+    val results = LinkedHashMap<String, Double>()
+    for (tie in listOf(false, true)) {
+        val cfg = Config(vocabSize = tok.vocabSize, blockSize = block, nEmbed = cli.int("embed", 64),
+            nHead = cli.int("heads", 4), nLayer = cli.int("layers", 2), tieWeights = tie)
+        val tmp = File.createTempFile("kortex-tiecmp", ".bin").apply { deleteOnExit() }
+        trainModel(tok, text, steps = steps, cfg = cfg, verbose = false,
+            valFraction = valFraction, evalEvery = maxOf(1, steps / 10), saveBest = tmp.path)
+        val (best, _) = Checkpoint.load(tmp.path)
+        val valLoss = heldOutLoss(best, data, split, block, 128)
+        val name = if (tie) "tied (shared)" else "learned (separate)"
+        results[name] = valLoss
+        println("  %-18s  %-10.4f  %-10.2f  %d".format(name, valLoss, Math.exp(valLoss), best.parameters().sumOf { it.data.size }))
+    }
+    val winner = results.minByOrNull { it.value }!!
+    val other = results.maxByOrNull { it.value }!!
+    println("\n-> ${winner.key} generalizes better here (val %.4f vs %.4f).".format(winner.value, other.value))
+    println("   Tying always uses vocab×embed fewer params; whether it also wins on")
+    println("   quality varies with corpus size and run — try --data and more --steps.")
 }
 
 /** Build a Sampler from --temp / --top-k / --top-p flags. */
@@ -553,7 +652,14 @@ fun printHelp() {
             --warmup N        linear LR warmup steps (default: 0)
             --cosine          cosine-decay the LR after warmup   --min-lr F
             --clip F          clip global gradient norm to F (default: off)
+            --early-stop      save the checkpoint at its lowest validation loss
             --out <file>      checkpoint path (default: model.bin)
+
+          eval         Report loss and perplexity of a saved model on a text file.
+            --model <file> (model.bin)  --data <file> (required)  --stride N
+
+          tiecompare   Train tied vs. untied and compare held-out perplexity.
+            --data <file> | (built-in sample)  --steps N  --embed/--heads/--layers
 
           generate     Continue a prompt once, using a saved model.
             --model <file> (model.bin)  --prompt "text"  --tokens N (200)
@@ -584,6 +690,8 @@ fun main(args: Array<String>) {
         "train" -> cmdTrain(cli)
         "generate" -> cmdGenerate(cli)
         "chat" -> cmdChat(cli)
+        "eval" -> cmdEval(cli)
+        "tiecompare" -> tieCompare(cli)
         "bench" -> cmdBench(cli)
         "schedule" -> cmdSchedule(cli)
         "gradcheck" -> gradCheck()
