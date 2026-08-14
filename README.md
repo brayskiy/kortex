@@ -93,8 +93,18 @@ $BIN eval --model model.bin --data heldout.txt
 $BIN tiecompare --steps 800 --runs 5
 $BIN poscompare char --runs 5          # learned vs. RoPE positions
 
-# Export a char model to JSON to run it in a browser (see the web demo):
+# Export a char model to JSON to run it in a browser (see web/):
 $BIN export --model model.bin --out model.json
+```
+
+**Run it in the browser.** `web/build.sh` trains a char model, exports it, and
+inlines the weights into a self-contained page (`web/chat.html`) that runs
+inference in JavaScript — no server. It even draws the model's live next-character
+probabilities as it writes. See [`web/README.md`](web/README.md). The JS port is
+verified to match the Kotlin model's output character-for-character.
+
+```bash
+web/build.sh && open web/chat.html
 
 # One-shot continuation from a saved model:
 $BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8
