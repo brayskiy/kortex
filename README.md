@@ -81,7 +81,16 @@ $BIN train --tok bpe --rope --out model.bin        # BPE + rotary positions
 $BIN train --tie --dropout 0.1 --out model.bin     # weight tying + dropout
 $BIN train --sample --eval-every 300 --out model.bin   # larger corpus + val loss
 $BIN train --warmup 100 --cosine --clip 1.0 --out model.bin  # LR schedule + grad clip
+$BIN train --sample --early-stop --eval-every 100 --out model.bin  # keep best-val model
 $BIN train --data mybook.txt --embed 96 --layers 3 # your own corpus, bigger model
+
+# Score a saved model on a text file (perplexity = the standard LM metric):
+$BIN eval --model model.bin --data heldout.txt
+#   cross-entropy (nats/token): 1.4364
+#   perplexity               : 4.21
+
+# Compare a shared vs. separate output head, judged at each model's best-val point:
+$BIN tiecompare --steps 800
 
 # One-shot continuation from a saved model:
 $BIN generate --model model.bin --prompt "knowledge" --tokens 60 --temp 0.8
@@ -113,6 +122,19 @@ which tames exploding gradients on bigger/deeper models. Training prints the liv
 $BIN schedule --steps 1500 --warmup 150 --cosine
 #   ▁▂▃▅▆▇█▇▇▇▇▇▇▇▆▆▆▆▆▅▅▅▅▄▄▄▄▃▃▃▃▂▂▂▂▂▁▁▁▁▁▁▁▁
 #   ^peak reached at step 150, then cosine-decays to 3.00e-04
+```
+
+**Perplexity & early stopping.** `eval --data file.txt` reports a saved model's
+cross-entropy and **perplexity** (`exp(loss)` — roughly "how many equally-likely
+tokens is it choosing between", lower is better) on held-out text. During
+training, `--early-stop` checkpoints the model every time validation loss reaches
+a new low, so the saved file holds the *best-generalizing* weights rather than the
+last (overfit) ones:
+
+```
+step   300  ...  val 2.3586  (gap +0.4592)  * saved
+step   700  ...  val 3.0373  (gap +2.0462)          <- overfitting; not saved
+best val 2.3586 at step 300 -> model.bin
 ```
 
 **Train / validation split.** Training holds out the last `--val F` (default 0.1)
