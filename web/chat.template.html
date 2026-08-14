@@ -1,0 +1,435 @@
+<title>Kortex — a tiny LLM running in your browser</title>
+<style>
+  :root {
+    --bg: #eef1f6; --surface: #ffffff; --surface-2: #f4f6fa;
+    --ink: #12151c; --muted: #59627a; --border: #dde2ec;
+    --accent: #3b5bdb; --accent-soft: #e7ecfe; --accent-ink: #ffffff;
+    --good: #0ca678; --caret: #3b5bdb;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --maxw: 860px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0d12; --surface: #12151d; --surface-2: #171b25;
+      --ink: #e8ecf4; --muted: #8b93a6; --border: #222836;
+      --accent: #7c93ff; --accent-soft: #1b2233; --accent-ink: #0b0d12;
+      --good: #35c69b; --caret: #7c93ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d12; --surface: #12151d; --surface-2: #171b25;
+    --ink: #e8ecf4; --muted: #8b93a6; --border: #222836;
+    --accent: #7c93ff; --accent-soft: #1b2233; --accent-ink: #0b0d12;
+    --good: #35c69b; --caret: #7c93ff;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--sans);
+    line-height: 1.55; margin: 0; padding: 32px 20px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; }
+
+  header { margin-bottom: 22px; }
+  .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .brand h1 {
+    font-family: var(--mono); font-size: 26px; font-weight: 600;
+    letter-spacing: -0.02em; margin: 0;
+  }
+  .brand h1 .k { color: var(--accent); }
+  .brand .live {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--good);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .brand .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .tagline { color: var(--muted); margin: 8px 0 0; max-width: 60ch; font-size: 15px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .chip {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 11px; font-variant-numeric: tabular-nums;
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; margin-top: 18px;
+  }
+
+  .console {
+    padding: 20px 22px; min-height: 168px;
+    font-family: var(--mono); font-size: 15.5px; line-height: 1.7;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .console .prompt { color: var(--muted); }
+  .console .gen { color: var(--ink); }
+  .caret {
+    display: inline-block; width: 0.6ch; height: 1.15em; margin-left: 1px;
+    background: var(--caret); vertical-align: text-bottom; border-radius: 1px;
+    animation: blink 1s steps(1) infinite;
+  }
+  .caret.idle { animation: none; opacity: 0.45; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .placeholder { color: var(--muted); }
+
+  /* next-token distribution */
+  .dist { border-top: 1px solid var(--border); padding: 16px 22px 18px; }
+  .dist .lbl {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 12px;
+  }
+  .bars { display: grid; gap: 7px; }
+  .bar-row { display: grid; grid-template-columns: 2.4ch 1fr 4.5ch; align-items: center; gap: 10px; }
+  .bar-row .tok {
+    font-family: var(--mono); font-size: 14px; text-align: center;
+    color: var(--ink); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 5px; padding: 1px 0;
+  }
+  .bar-row.top .tok { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .track { height: 10px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width 90ms linear; }
+  .bar-row.top .fill { background: var(--accent); }
+  .bar-row:not(.top) .fill { background: color-mix(in srgb, var(--accent) 45%, var(--muted)); }
+  .pct { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* controls */
+  .controls { margin-top: 18px; display: grid; gap: 16px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .promptbox {
+    flex: 1 1 320px; display: flex; gap: 8px; align-items: stretch;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 6px 6px 6px 14px;
+  }
+  .promptbox input {
+    flex: 1; border: 0; background: transparent; color: var(--ink);
+    font-family: var(--mono); font-size: 15px; outline: none; min-width: 0;
+  }
+  .promptbox input::placeholder { color: var(--muted); }
+  button.go {
+    font-family: var(--sans); font-weight: 600; font-size: 14px;
+    background: var(--accent); color: var(--accent-ink); border: 0;
+    border-radius: 8px; padding: 9px 18px; cursor: pointer; white-space: nowrap;
+    transition: filter 120ms ease;
+  }
+  button.go:hover { filter: brightness(1.06); }
+  button.go:disabled { opacity: 0.55; cursor: default; }
+  button.go.stop { background: var(--surface); color: var(--ink); border: 1px solid var(--border); }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+  .presets span { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .preset {
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px 10px; cursor: pointer;
+  }
+  .preset:hover { border-color: var(--accent); color: var(--accent); }
+
+  .sliders {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px 22px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .slider label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--muted); font-family: var(--mono);
+    letter-spacing: 0.03em; margin-bottom: 7px;
+  }
+  .slider label .val { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    background: var(--border); border-radius: 999px; outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; border: 2px solid var(--surface);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 15px; height: 15px; border-radius: 50%; background: var(--accent);
+    cursor: pointer; border: 2px solid var(--surface);
+  }
+  input[type="range"]:focus-visible { box-shadow: 0 0 0 3px var(--accent-soft); }
+  button.go:focus-visible, .preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .hint { color: var(--muted); font-size: 12.5px; font-family: var(--mono); min-height: 1.2em; }
+  .hint.warn { color: var(--good); }
+
+  footer {
+    margin-top: 28px; color: var(--muted); font-size: 13px;
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  .metric { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .caret { animation: none; }
+    .fill { transition: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1><span class="k">kortex</span> · browser demo</h1>
+      <span class="live"><span class="dot"></span> running locally</span>
+    </div>
+    <p class="tagline">A from-scratch GPT — attention, MLP, the works — trained on Aesop's fables and
+      compiled to weights that run <b>entirely in your browser</b>. No server, no API. Type a few words
+      and watch it continue them one character at a time, with its live next-character guesses below.</p>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <div class="card">
+    <div class="console" id="console"><span class="placeholder">Press Generate (or pick a starter) to watch the model write…</span></div>
+    <div class="dist">
+      <div class="lbl">next character · model's top guesses</div>
+      <div class="bars" id="bars"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <div class="promptbox">
+        <input id="prompt" type="text" value="the fox saw" spellcheck="false"
+               placeholder="type a starter (lowercase letters, spaces, . , :)" aria-label="prompt" />
+      </div>
+      <button class="go" id="go">Generate</button>
+    </div>
+    <div class="presets">
+      <span>try:</span>
+      <button class="preset">the crow was</button>
+      <button class="preset">a wolf came upon</button>
+      <button class="preset">the country mouse</button>
+      <button class="preset">knowledge is</button>
+    </div>
+    <div class="sliders">
+      <div class="slider">
+        <label>temperature <span class="val" id="tempV">0.80</span></label>
+        <input type="range" id="temp" min="0" max="1.5" step="0.05" value="0.8" />
+      </div>
+      <div class="slider">
+        <label>top-k <span class="val" id="topkV">0 (off)</span></label>
+        <input type="range" id="topk" min="0" max="15" step="1" value="0" />
+      </div>
+      <div class="slider">
+        <label>top-p <span class="val" id="toppV">1.00 (off)</span></label>
+        <input type="range" id="topp" min="0.1" max="1" step="0.05" value="1" />
+      </div>
+      <div class="slider">
+        <label>length <span class="val" id="lenV">180</span></label>
+        <input type="range" id="len" min="40" max="320" step="10" value="180" />
+      </div>
+    </div>
+    <div class="hint" id="hint"></div>
+  </div>
+
+  <footer>
+    <span>~<span class="metric" id="pcount">?</span> parameters · char-level · runs on <span class="metric" id="tps">—</span></span>
+    <span>from the <a href="https://github.com/brayskiy/kortex" target="_blank" rel="noopener">Kortex</a> project — an LLM built from scratch in Kotlin</span>
+  </footer>
+</div>
+
+<script>
+const MODEL = __MODEL_JSON__;
+
+// ---- tokenizer (char) ----
+const VOCABARR = [...MODEL.vocab];
+const stoi = new Map(VOCABARR.map((c, i) => [c, i]));
+const itos = (i) => VOCABARR[i];
+const showChar = (c) => c === " " ? "␣" : c;
+
+const E = MODEL.nEmbed, H = MODEL.nHead, HD = (E / H) | 0, V = VOCABARR.length, L = MODEL.nLayer, B = MODEL.blockSize;
+
+// ---- math ----
+function layerNorm(vec, g, b) {
+  let mean = 0; for (let j = 0; j < E; j++) mean += vec[j]; mean /= E;
+  let va = 0; for (let j = 0; j < E; j++) { const d = vec[j] - mean; va += d * d; } va /= E;
+  const inv = 1 / Math.sqrt(va + 1e-5), o = new Float64Array(E);
+  for (let j = 0; j < E; j++) o[j] = g[j] * ((vec[j] - mean) * inv) + b[j];
+  return o;
+}
+function matVec(x, W, inN, outN) {
+  const y = new Float64Array(outN);
+  for (let i = 0; i < inN; i++) { const xi = x[i]; if (xi === 0) continue; const base = i * outN; for (let o = 0; o < outN; o++) y[o] += xi * W[base + o]; }
+  return y;
+}
+function gelu(x) { const c = Math.sqrt(2 / Math.PI); return 0.5 * x * (1 + Math.tanh(c * (x + 0.044715 * x * x * x))); }
+
+// forward the whole context; return logits for the LAST position (Float64Array of length V)
+function forward(ids) {
+  const T = ids.length;
+  const x = [];
+  for (let t = 0; t < T; t++) {
+    const row = new Float64Array(E), ib = ids[t] * E;
+    for (let j = 0; j < E; j++) row[j] = MODEL.tokEmb[ib + j] + (MODEL.posEmb ? MODEL.posEmb[t * E + j] : 0);
+    x.push(row);
+  }
+  const scale = 1 / Math.sqrt(HD);
+  for (let l = 0; l < L; l++) {
+    const bl = MODEL.blocks[l];
+    const n1 = x.map(r => layerNorm(r, bl.ln1g, bl.ln1b));
+    const q = n1.map(r => matVec(r, bl.wq, E, E));
+    const k = n1.map(r => matVec(r, bl.wk, E, E));
+    const v = n1.map(r => matVec(r, bl.wv, E, E));
+    for (let t = 0; t < T; t++) {
+      const out = new Float64Array(E);
+      for (let h = 0; h < H; h++) {
+        const off = h * HD, sc = new Float64Array(t + 1);
+        let mx = -Infinity;
+        for (let s = 0; s <= t; s++) { let d = 0; for (let j = 0; j < HD; j++) d += q[t][off + j] * k[s][off + j]; d *= scale; sc[s] = d; if (d > mx) mx = d; }
+        let sum = 0; for (let s = 0; s <= t; s++) { const e = Math.exp(sc[s] - mx); sc[s] = e; sum += e; }
+        for (let s = 0; s <= t; s++) { const w = sc[s] / sum; for (let j = 0; j < HD; j++) out[off + j] += w * v[s][off + j]; }
+      }
+      const ao = matVec(out, bl.wo, E, E);
+      for (let j = 0; j < E; j++) x[t][j] += ao[j];   // residual
+    }
+    for (let t = 0; t < T; t++) {
+      const n2 = layerNorm(x[t], bl.ln2g, bl.ln2b);
+      const h1 = matVec(n2, bl.w1, E, 4 * E);
+      for (let o = 0; o < 4 * E; o++) h1[o] = gelu(h1[o] + bl.b1[o]);
+      const m = matVec(h1, bl.w2, 4 * E, E);
+      for (let o = 0; o < E; o++) x[t][o] += m[o] + bl.b2[o];   // residual
+    }
+  }
+  const xf = layerNorm(x[T - 1], MODEL.lnFg, MODEL.lnFb);
+  const logits = new Float64Array(V);
+  if (MODEL.head) { for (let o = 0; o < V; o++) { let s = 0; for (let j = 0; j < E; j++) s += xf[j] * MODEL.head[j * V + o]; logits[o] = s; } }
+  else { for (let o = 0; o < V; o++) { let s = 0, base = o * E; for (let j = 0; j < E; j++) s += xf[j] * MODEL.tokEmb[base + j]; logits[o] = s; } }
+  return logits;
+}
+
+// ---- sampling (mirrors Sampling.kt) ----
+function softmaxTemp(logits, temp) {
+  let mx = -Infinity; for (let i = 0; i < V; i++) if (logits[i] > mx) mx = logits[i];
+  const p = new Float64Array(V); let s = 0;
+  for (let i = 0; i < V; i++) { const e = Math.exp((logits[i] - mx) / temp); p[i] = e; s += e; }
+  for (let i = 0; i < V; i++) p[i] /= s; return p;
+}
+function sampleFrom(logits, temp, topK, topP) {
+  const p = softmaxTemp(logits, temp <= 0 ? 1 : temp);
+  if (temp <= 0) { let bi = 0; for (let i = 1; i < V; i++) if (logits[i] > logits[bi]) bi = i; return { id: bi, probs: p }; }
+  const order = [...p.keys()].sort((a, b) => p[b] - p[a]);
+  const keep = new Array(V).fill(!(topK > 0 && topK < V));
+  if (topK > 0 && topK < V) for (let r = 0; r < topK; r++) keep[order[r]] = true;
+  if (topP < 1) {
+    const nuc = new Array(V).fill(false); let cum = 0;
+    for (const i of order) { if (!keep[i]) continue; nuc[i] = true; cum += p[i]; if (cum >= topP) break; }
+    for (let i = 0; i < V; i++) keep[i] = keep[i] && nuc[i];
+  }
+  let z = 0; for (let i = 0; i < V; i++) if (keep[i]) z += p[i];
+  let r = Math.random() * z;
+  for (const i of order) { if (!keep[i]) continue; r -= p[i]; if (r <= 0) return { id: i, probs: p }; }
+  return { id: order.find(i => keep[i]), probs: p };
+}
+
+// ---- UI ----
+const $ = (id) => document.getElementById(id);
+const consoleEl = $("console"), barsEl = $("bars"), hintEl = $("hint");
+let running = false, stopFlag = false;
+
+function paramCount() {
+  let n = MODEL.tokEmb.length + MODEL.lnFg.length + MODEL.lnFb.length;
+  if (MODEL.posEmb) n += MODEL.posEmb.length;
+  if (MODEL.head) n += MODEL.head.length;
+  for (const b of MODEL.blocks) for (const key of ["ln1g","ln1b","ln2g","ln2b","wq","wk","wv","wo","w1","b1","w2","b2"]) n += b[key].length;
+  return n;
+}
+function fmtParams(n) { return n >= 1000 ? (n / 1000).toFixed(0) + "K" : "" + n; }
+
+function renderChips() {
+  const items = [
+    ["params", fmtParams(paramCount())], ["layers", L], ["heads", H],
+    ["embed", E], ["vocab", V], ["context", B], ["trained on", "Aesop's fables"],
+  ];
+  $("chips").innerHTML = items.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  $("pcount").textContent = fmtParams(paramCount());
+}
+
+function renderDist(probs) {
+  const order = probs ? [...probs.keys()].sort((a, b) => probs[b] - probs[a]).slice(0, 5) : [];
+  let html = "";
+  for (let r = 0; r < 5; r++) {
+    const i = order[r], p = i == null ? 0 : probs[i];
+    const ch = i == null ? "·" : showChar(itos(i));
+    html += `<div class="bar-row ${r === 0 && i != null ? "top" : ""}">
+      <div class="tok">${ch === "<" ? "&lt;" : ch}</div>
+      <div class="track"><div class="fill" style="width:${(p * 100).toFixed(1)}%"></div></div>
+      <div class="pct">${i == null ? "" : (p * 100).toFixed(0) + "%"}</div></div>`;
+  }
+  barsEl.innerHTML = html;
+}
+
+function draw(promptStr, genStr, showCaret, idle) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const caret = showCaret ? `<span class="caret ${idle ? "idle" : ""}"></span>` : "";
+  consoleEl.innerHTML = `<span class="prompt">${esc(promptStr)}</span><span class="gen">${esc(genStr)}</span>${caret}`;
+}
+
+function cleanPrompt(raw) {
+  const lowered = raw.toLowerCase();
+  let kept = "", dropped = false;
+  for (const c of lowered) { if (stoi.has(c)) kept += c; else dropped = true; }
+  return { kept, dropped };
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+async function generate() {
+  if (running) { stopFlag = true; return; }
+  const rawPrompt = $("prompt").value;
+  const { kept, dropped } = cleanPrompt(rawPrompt);
+  const seed = kept.length ? kept : (stoi.has("the ") ? "the " : itos(0));
+  hintEl.textContent = dropped ? "note: this model only knows lowercase letters, space, and . , : — other characters were dropped." : "";
+  hintEl.className = "hint" + (dropped ? " warn" : "");
+
+  const temp = parseFloat($("temp").value), topK = parseInt($("topk").value), topP = parseFloat($("topp").value);
+  const maxNew = parseInt($("len").value);
+
+  running = true; stopFlag = false;
+  const go = $("go"); go.textContent = "Stop"; go.classList.add("stop");
+
+  let ids = [...seed].map(c => stoi.get(c));
+  let gen = "";
+  draw(seed, "", true, false);
+
+  let produced = 0, t0 = performance.now(), lastFrame = t0;
+  while (produced < maxNew && !stopFlag) {
+    const ctx = ids.slice(Math.max(0, ids.length - B));
+    const logits = forward(ctx);
+    const { id, probs } = sampleFrom(logits, temp, topK, topP);
+    ids.push(id); gen += itos(id); produced++;
+    renderDist(probs);
+    draw(seed, gen, true, false);
+    // pace the stream so it's watchable; yield to the browser
+    const now = performance.now();
+    $("tps").textContent = (produced / ((now - t0) / 1000)).toFixed(0) + " char/s";
+    if (!reduced) await sleep(12); else if (now - lastFrame > 40) { lastFrame = now; await sleep(0); }
+  }
+  draw(seed, gen, true, true);
+  running = false; go.textContent = "Generate"; go.classList.remove("stop");
+}
+
+// wire up
+renderChips();
+renderDist(null);
+$("go").addEventListener("click", generate);
+$("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && !running) generate(); });
+for (const el of ["temp","topk","topp","len"]) {
+  const upd = () => {
+    $("tempV").textContent = parseFloat($("temp").value).toFixed(2);
+    const k = parseInt($("topk").value); $("topkV").textContent = k === 0 ? "0 (off)" : k;
+    const pp = parseFloat($("topp").value); $("toppV").textContent = pp >= 1 ? "1.00 (off)" : pp.toFixed(2);
+    $("lenV").textContent = $("len").value;
+  };
+  $(el).addEventListener("input", upd);
+}
+document.querySelectorAll(".preset").forEach(btn =>
+  btn.addEventListener("click", () => { $("prompt").value = btn.textContent; if (!running) generate(); }));
+// initial slider labels
+$("tempV").textContent = "0.80";
+</script>

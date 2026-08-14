@@ -19,3 +19,7 @@ attention.html
 
 # OS
 .DS_Store
+
+# Web demo generated files
+web/chat.html
+web/model.json
