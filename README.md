@@ -103,6 +103,10 @@ inference in JavaScript — no server. It even draws the model's live next-chara
 probabilities as it writes. See [`web/README.md`](web/README.md). The JS port is
 verified to match the Kotlin model's output character-for-character.
 
+![The Kortex browser demo: a from-scratch GPT continuing "the fox saw…" with a
+live bar chart of the model's top next-character guesses (space 78%, r 20%, …) and
+temperature / top-k / top-p sliders.](docs/browser-demo.png)
+
 ```bash
 web/build.sh && open web/chat.html
 
