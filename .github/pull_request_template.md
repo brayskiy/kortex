@@ -27,5 +27,5 @@
 
 <!--
   On a `develop` → `main` merge, a GitHub Release is tagged automatically as
-  YY.WW.patch (ISO week-date, e.g. 26.33.0). No version markers needed.
+  YY.WW.NN (ISO week-date, zero-padded patch, e.g. 26.34.01). No markers needed.
 -->
