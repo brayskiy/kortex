@@ -27,25 +27,20 @@ jobs:
       - name: Compute next version
         id: ver
         run: |
+          # Calendar versioning: YY.WW.patch, where YY/WW are the ISO week-date
+          # (date +%g/%V handle the year-boundary correctly). The patch counter
+          # resets each new ISO week and increments for multiple releases in one.
           git fetch --tags --force
-          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
-          msg=$(git log -1 --format=%B)
+          yw="$(date +%g).$(date +%V)"           # e.g. 26.33
+          latest=$(git tag -l "${yw}.*" | sort -t. -k3 -n | tail -n1)
           if [ -z "$latest" ]; then
-            next="v0.1.0"                       # first release
+            patch=0                              # first release this ISO week
           else
-            v=${latest#v}; IFS=. read -r MA MI PA <<< "$v"
-            # Bump level from the merge commit message: [major] > [minor] > patch.
-            if printf '%s' "$msg" | grep -qiE '\[major\]'; then
-              MA=$((MA+1)); MI=0; PA=0
-            elif printf '%s' "$msg" | grep -qiE '\[minor\]'; then
-              MI=$((MI+1)); PA=0
-            else
-              PA=$((PA+1))
-            fi
-            next="v$MA.$MI.$PA"
+            patch=$(( ${latest##*.} + 1 ))
           fi
+          next="${yw}.${patch}"
           echo "next=$next" >> "$GITHUB_OUTPUT"
-          echo "Next release: $next (previous: ${latest:-none})"
+          echo "Next release: $next (latest this week: ${latest:-none})"
 
       - name: Create GitHub Release
         env:
