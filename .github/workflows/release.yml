@@ -34,11 +34,11 @@ jobs:
           yw="$(date +%g).$(date +%V)"           # e.g. 26.33
           latest=$(git tag -l "${yw}.*" | sort -t. -k3 -n | tail -n1)
           if [ -z "$latest" ]; then
-            patch=0                              # first release this ISO week
+            patch=1                              # first release this ISO week starts at 01
           else
-            patch=$(( ${latest##*.} + 1 ))
+            patch=$(( 10#${latest##*.} + 1 ))    # 10# forces base-10 (so 08/09 don't fail)
           fi
-          next="${yw}.${patch}"
+          next="${yw}.$(printf '%02d' "$patch")" # zero-pad the patch to 2 digits -> 26.33.01
           echo "next=$next" >> "$GITHUB_OUTPUT"
           echo "Next release: $next (latest this week: ${latest:-none})"
 

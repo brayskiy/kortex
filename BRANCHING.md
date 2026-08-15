@@ -56,13 +56,14 @@ version markers needed.
 
 | When | Tag |
 |------|-----|
-| first release in an ISO week | `YY.WW.0` (e.g. `26.33.0`) |
-| next release that same week  | `YY.WW.1`, `YY.WW.2`, …    |
-| first release next week      | `YY.(WW+1).0`             |
+| first release in an ISO week | `YY.WW.01` (e.g. `26.34.01`) |
+| next release that same week  | `YY.WW.02`, `YY.WW.03`, …    |
+| first release next week      | `YY.(WW+1).01`             |
 
-`YY`/`WW` come from `date +%g`/`+%V`, so the year rolls over correctly at the
-week boundary. (Earlier releases used semver `v0.1.0`…`v0.9.0`; the scheme
-switched to calendar versioning after that.)
+`YY`/`WW` come from `date +%g`/`+%V` (so the year rolls over correctly at the week
+boundary) and the patch is zero-padded to two digits, starting at `01` each week.
+(Earlier releases used semver `v0.1.0`…`v0.9.0`, then one unpadded `26.33.0`
+before this padding change.)
 
 After publishing, the workflow regenerates **[CHANGELOG.md](CHANGELOG.md)** from
 the release notes and opens an auto-merging PR into `develop` (since `main` can't
