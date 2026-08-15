@@ -50,16 +50,19 @@ gh pr merge --merge        # allowed only from develop, only if tests pass
 ## Releases
 
 When a `develop → main` PR merges, **[release.yml](.github/workflows/release.yml)**
-automatically tags a semver release and publishes a GitHub Release with
-auto-generated notes. The bump is derived from the release PR's title:
+automatically tags a **calendar release** (`YY.WW.patch`, ISO week-date) and
+publishes a GitHub Release with auto-generated notes — no manual tagging or
+version markers needed.
 
-| Marker in PR title | Result (from `vX.Y.Z`) |
-|--------------------|------------------------|
-| _(none)_           | patch → `vX.Y.(Z+1)`   |
-| `[minor]`          | `vX.(Y+1).0`           |
-| `[major]`          | `v(X+1).0.0`           |
+| When | Tag |
+|------|-----|
+| first release in an ISO week | `YY.WW.0` (e.g. `26.33.0`) |
+| next release that same week  | `YY.WW.1`, `YY.WW.2`, …    |
+| first release next week      | `YY.(WW+1).0`             |
 
-The first release is `v0.1.0`. Tags are created on `main`; no manual tagging needed.
+`YY`/`WW` come from `date +%g`/`+%V`, so the year rolls over correctly at the
+week boundary. (Earlier releases used semver `v0.1.0`…`v0.9.0`; the scheme
+switched to calendar versioning after that.)
 
 After publishing, the workflow regenerates **[CHANGELOG.md](CHANGELOG.md)** from
 the release notes and opens an auto-merging PR into `develop` (since `main` can't

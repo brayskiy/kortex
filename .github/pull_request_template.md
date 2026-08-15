@@ -26,8 +26,6 @@
 ## Release notes (release PRs only)
 
 <!--
-  On a `develop` → `main` merge, a GitHub Release is tagged automatically.
-  Default bump is patch. To bump further, include a marker in THIS PR's title:
-    [minor]  -> vX.(Y+1).0
-    [major]  -> v(X+1).0.0
+  On a `develop` → `main` merge, a GitHub Release is tagged automatically as
+  YY.WW.patch (ISO week-date, e.g. 26.33.0). No version markers needed.
 -->
