@@ -20,6 +20,8 @@ positions ─► pos embedding┘
 > data/shape flow, the autograd design), **[CONTRIBUTING.md](CONTRIBUTING.md)**
 > (build/test, and how to add a differentiable op that passes the gradient check),
 > and **[BRANCHING.md](BRANCHING.md)** (the `work → develop → main` PR flow).
+> **[docs/linear-algebra.md](docs/linear-algebra.md)** maps the linear-algebra
+> operations to the code (and why a GPT needs no matrix inverse / SVD / eigen).
 > Release history is in **[CHANGELOG.md](CHANGELOG.md)** (auto-generated from releases).
 
 ---
